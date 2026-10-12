@@ -1,0 +1,189 @@
+{% extends "base.html" %}
+{% block title %}管理{% endblock %}
+{% block body_attrs %}data-role="admin"{% endblock %}
+{% block body %}
+<header class="topbar">
+  <span class="title">管理（PC3） <span id="shop-name">{{ settings.shop_name }}</span></span>
+  <span id="test-badge" class="badge badge-test{% if not settings.test_mode %} hidden{% endif %}">テストモード</span>
+  <span class="num" id="clock"></span>
+</header>
+<nav class="ad-tabs" id="tabs">
+  <button type="button" data-tab="home" class="active">ホーム</button>
+  <button type="button" data-tab="products">商品</button>
+  <button type="button" data-tab="orders">注文</button>
+  <button type="button" data-tab="sales">売上・レジ締め</button>
+  <button type="button" data-tab="logs">操作ログ</button>
+  <button type="button" data-tab="settings">設定</button>
+</nav>
+<main class="ad-main">
+
+  <!-- ============================================================ ホーム -->
+  <section data-pane="home">
+    <div id="home-warnings"></div>
+    <div class="ad-grid">
+      <div class="card">
+        <h2>PC1・PC2で開くURL</h2>
+        <div id="urls"></div>
+        <p class="muted">スマホ・タブレットはQRを読むだけで開けます。証明書の警告が出たら「詳細設定 → アクセスする」。</p>
+      </div>
+      <div class="card">
+        <h2>端末の接続状況</h2>
+        <div id="terminals"></div>
+      </div>
+      <div class="card">
+        <h2>今日の売上</h2>
+        <div id="home-sales"></div>
+      </div>
+      <div class="card">
+        <h2>バックアップ</h2>
+        <div id="backup-info"></div>
+        <div class="row" style="margin-top:10px">
+          <button type="button" id="btn-backup" class="btn-primary">今すぐバックアップ</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ 商品 -->
+  <section data-pane="products" class="hidden">
+    <form class="card" id="product-form">
+      <h2>商品の追加</h2>
+      <div class="row">
+        <input name="name" placeholder="商品名" required maxlength="40" class="grow" style="min-width:180px">
+        <input name="price" type="number" placeholder="価格（円）" required min="50" step="50" style="width:140px">
+        <input name="stock" type="number" placeholder="作れる数（任意）" min="0" style="width:170px">
+        <button type="submit" class="btn-primary">追加</button>
+      </div>
+      <p class="muted">価格は50円の倍数のみ。商品コード（M001…）と表示順は自動で付きます。作れる数を入れると売れた分だけ減り、0で自動的に売切になります。</p>
+    </form>
+    <div class="card">
+      <div class="row" style="margin-bottom:8px">
+        <h2 class="grow" style="margin:0">商品一覧</h2>
+        <a class="btn" href="/admin/print" target="_blank">QRカード印刷</a>
+      </div>
+      <div class="table-wrap"><table class="data" id="product-table"></table></div>
+    </div>
+  </section>
+
+  <!-- ============================================================ 注文 -->
+  <section data-pane="orders" class="hidden">
+    <div class="card">
+      <h2>注文の検索</h2>
+      <form class="row" id="order-filter">
+        <select name="date" id="order-date"><option value="">全営業日</option></select>
+        <select name="status">
+          <option value="">全状態</option><option value="waiting">未着手</option><option value="cooking">調理中</option>
+          <option value="delivered">受渡済</option><option value="cancelled">取消</option>
+        </select>
+        <select name="test"><option value="all">テスト含む</option><option value="real">本番のみ</option><option value="test">テストのみ</option></select>
+        <input name="q" placeholder="呼出番号 / 商品名" style="width:180px">
+        <button type="submit">検索</button>
+        <a class="btn" href="/admin/api/export/orders.csv">注文CSV</a>
+        <a class="btn" href="/admin/api/export/items.csv">明細CSV</a>
+      </form>
+      <p class="muted" id="order-count"></p>
+      <div class="table-wrap" style="max-height:60vh;overflow:auto"><table class="data" id="order-table"></table></div>
+    </div>
+
+    <form class="card" id="manual-form">
+      <h2>手入力（障害時に紙で受けた注文）</h2>
+      <div class="row">
+        <label>営業日 <input type="date" name="business_date" required></label>
+        <label>会計時刻 <input type="time" name="paid_time"></label>
+        <label>呼出番号 <input type="number" name="call_no" min="0" style="width:110px" placeholder="自動"></label>
+        <label>状態 <select name="status"><option value="delivered">受渡済</option><option value="waiting">未着手（厨房へ送る）</option></select></label>
+      </div>
+      <div id="manual-items" class="row" style="margin-top:10px"></div>
+      <div class="row" style="margin-top:10px">
+        <strong id="manual-total" class="grow num"></strong>
+        <button type="submit" class="btn-primary">登録</button>
+      </div>
+    </form>
+
+    <div class="card">
+      <h2>注文データの削除</h2>
+      <p class="muted">受渡済・取消の注文を完全に削除します。削除した注文は売上集計からも消えます。先にCSVを保存してください。</p>
+      <form class="row" id="purge-form">
+        <select name="business_date" id="purge-date"><option value="">全営業日</option></select>
+        <label><input type="checkbox" name="delivered" checked style="min-height:auto"> 受渡済</label>
+        <label><input type="checkbox" name="cancelled" checked style="min-height:auto"> 取消</label>
+        <select name="test"><option value="all">テスト・本番とも</option><option value="test">テスト注文のみ</option><option value="real">本番のみ</option></select>
+        <button type="submit" class="btn-danger">対象を確認して削除</button>
+      </form>
+    </div>
+  </section>
+
+  <!-- ============================================================ 売上 -->
+  <section data-pane="sales" class="hidden">
+    <div class="row" style="margin-bottom:12px">
+      <label>集計対象 <select id="sales-date"><option value="">全期間</option></select></label>
+      <button type="button" id="btn-sales-reload">更新</button>
+    </div>
+    <div class="stat-row" id="sales-stats"></div>
+    <div class="ad-grid">
+      <div class="card"><h2>商品別</h2><div class="table-wrap"><table class="data" id="sales-products"></table></div></div>
+      <div class="card"><h2>時間帯別の注文数</h2><div class="table-wrap"><table class="data" id="sales-hourly"></table></div></div>
+      <div class="card"><h2>日別</h2><div class="table-wrap"><table class="data" id="sales-days"></table></div></div>
+    </div>
+    <form class="card" id="closing-form" style="margin-top:14px">
+      <h2>レジ締め</h2>
+      <div class="row">
+        <label>営業日 <input type="date" name="business_date" id="closing-date" required></label>
+        <span id="closing-expected" class="num" style="font-weight:800"></span>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <label>数えた金券 <input type="number" name="counted_tickets" min="0" required style="width:120px"> 枚</label>
+        <input name="note" placeholder="メモ（任意）" class="grow">
+        <button type="submit" class="btn-primary">記録</button>
+      </div>
+      <div id="closing-result" style="margin-top:10px"></div>
+      <h3 style="margin-top:16px">これまでのレジ締め</h3>
+      <div class="table-wrap"><table class="data" id="closing-table"></table></div>
+    </form>
+  </section>
+
+  <!-- ============================================================ ログ -->
+  <section data-pane="logs" class="hidden">
+    <div class="card">
+      <form class="row" id="log-filter">
+        <select name="terminal">
+          <option value="">全端末</option><option>PC1受付</option><option>PC2厨房</option><option>PC3管理</option>
+        </select>
+        <select name="kind" id="log-kind"><option value="">全種類</option></select>
+        <label>から <input type="datetime-local" name="since"></label>
+        <label>まで <input type="datetime-local" name="until"></label>
+        <button type="submit">絞り込み</button>
+        <a class="btn" href="/admin/api/export/events.csv">ログCSV</a>
+      </form>
+      <p class="muted">新しいログは自動で上に追加されます。</p>
+      <div class="table-wrap" style="max-height:70vh;overflow:auto"><table class="data" id="log-table"></table></div>
+    </div>
+  </section>
+
+  <!-- ============================================================ 設定 -->
+  <section data-pane="settings" class="hidden">
+    <form class="card" id="settings-form">
+      <h2>設定</h2>
+      <div class="form-grid">
+        <label for="s-shop">店名</label><input id="s-shop" name="shop_name" maxlength="60">
+        <label for="s-day1">営業日 1日目</label><input id="s-day1" type="date" name="day1">
+        <label for="s-day2">営業日 2日目</label><input id="s-day2" type="date" name="day2">
+        <label for="s-start">呼出番号の開始値</label><input id="s-start" type="number" name="call_no_start" min="0" style="width:140px">
+        <label for="s-test">テストモード</label>
+        <label><input id="s-test" type="checkbox" name="test_mode" style="min-height:auto"> 有効（この間の注文はテスト注文として売上から除外）</label>
+        <label for="s-usb">USBメモリのバックアップ先</label><input id="s-usb" name="usb_backup_dir" placeholder="例: E:\ （空欄ならPC3内のみ）">
+        <label for="s-pass">接続用パスコード（変更時のみ）</label>
+        <div class="row">
+          <input id="s-pass" type="password" name="passcode" minlength="4" autocomplete="new-password" placeholder="新しいパスコード">
+          <input id="s-pass2" type="password" autocomplete="new-password" placeholder="もう一度">
+        </div>
+      </div>
+      <p class="muted">パスコードを変えると、PC1・PC2は登録し直しになります。</p>
+      <div class="row"><button type="submit" class="btn-primary">保存</button></div>
+    </form>
+  </section>
+</main>
+{% endblock %}
+{% block scripts %}
+<script src="/static/admin.js?v={{ v }}"></script>
+{% endblock %}

@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %}受付{% endblock %}
+{% block body_attrs %}data-role="reception" class="rc-body"{% endblock %}
+{% block body %}
+<header class="topbar">
+  <span class="title">受付 <span id="shop-name">{{ settings.shop_name }}</span></span>
+  <span id="test-badge" class="badge badge-test{% if not settings.test_mode %} hidden{% endif %}">テストモード</span>
+  <button id="btn-camera" type="button">カメラ ON</button>
+  <button id="btn-history" type="button">履歴・取消</button>
+</header>
+<main class="rc-main">
+  <section class="rc-input">
+    <div class="cam-box" id="cam-box">
+      <video id="video" playsinline muted></video>
+      <div class="cam-tools">
+        <button type="button" id="btn-facing">背面カメラ</button>
+        <button type="button" id="btn-mirror">左右反転</button>
+      </div>
+      <div class="cam-msg" id="cam-msg">QRカードをかざしてください</div>
+    </div>
+    <div class="qty-row" id="qty-row" aria-label="まとめて追加する個数">
+      <span class="label">個数</span>
+      {% for n in range(2, 11) %}<button type="button" data-qty="{{ n }}">{{ n }}</button>{% endfor %}
+      <span class="pending" id="qty-pending"></span>
+    </div>
+    <div id="no-products" class="empty-note hidden">商品が未登録です。PC3で登録してください</div>
+    <div class="product-grid" id="product-grid"></div>
+  </section>
+
+  <aside class="rc-cart" id="cart">
+    <div class="cart-head">
+      <h2>カート</h2>
+      <button type="button" class="btn-small btn-ghost-danger" id="btn-clear">クリア</button>
+    </div>
+    <ul class="cart-list" id="cart-list"></ul>
+    <div class="cart-foot">
+      <button type="button" class="cart-total" id="cart-total" aria-label="カートを開く">
+        <span class="amount num" id="total-amount">0円</span>
+        <span class="detail num" id="total-detail">0点</span>
+        <span class="open-hint" id="open-hint">カート ▲</span>
+      </button>
+      <div class="cart-buttons">
+        <button type="button" class="btn-primary btn-big checkout" id="btn-checkout" disabled>会計へ</button>
+      </div>
+    </div>
+  </aside>
+</main>
+
+<!-- 会計 -->
+<div class="overlay hidden" id="ov-checkout">
+  <div class="panel">
+    <div class="panel-head"><h2>会計</h2></div>
+    <table class="checkout-lines" id="checkout-lines"></table>
+    <div class="big-total num" id="checkout-total"></div>
+    <p class="muted" style="text-align:center">金券の枚数を数えて受け取ったら「受取確認」を押してください</p>
+    <div id="save-status" class="save-status hidden"></div>
+    <div class="panel-actions">
+      <button type="button" class="btn-big" id="btn-back">戻る</button>
+      <button type="button" class="btn-ok btn-big" id="btn-paid">受取確認</button>
+    </div>
+  </div>
+</div>
+
+<!-- 呼出番号 -->
+<div class="overlay hidden" id="ov-callno">
+  <div class="panel">
+    <div class="call-no-label" id="callno-label">呼出番号</div>
+    <div class="call-no num" id="callno-value"></div>
+    <p style="text-align:center;font-weight:800" id="callno-detail"></p>
+    <p class="muted" style="text-align:center">この番号を番号札に書いて渡してください</p>
+    <div class="panel-actions">
+      <button type="button" class="btn-primary btn-big" id="btn-next">次のお客様</button>
+    </div>
+  </div>
+</div>
+
+<!-- 履歴・取消 -->
+<div class="overlay hidden" id="ov-history">
+  <div class="panel">
+    <div class="panel-head">
+      <h2>今日の注文</h2>
+      <button type="button" id="btn-history-close">閉じる</button>
+    </div>
+    <ul class="history-list" id="history-list"></ul>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script src="/static/vendor/jsQR.js?v={{ v }}"></script>
+<script src="/static/reception.js?v={{ v }}"></script>
+{% endblock %}

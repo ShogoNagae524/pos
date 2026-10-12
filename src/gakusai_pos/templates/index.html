@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}学祭POS{% endblock %}
+{% block body %}
+<header class="topbar"><span class="title">{{ settings.shop_name or "学祭飲食POS" }}</span></header>
+<main class="page">
+  {% if pc3 %}
+  <div class="card stack">
+    <h2>このPC（PC3）</h2>
+    <a class="btn btn-primary btn-big" href="/admin">管理画面を開く</a>
+  </div>
+  {% endif %}
+  <div class="card stack">
+    <h2>この端末の役割を選んでください</h2>
+    <a class="btn btn-big" href="/login?role=reception">PC1 受付（レジ）</a>
+    <a class="btn btn-big" href="/login?role=kitchen">PC2 厨房</a>
+    <p class="muted">はじめての端末ではパスコードの入力が必要です。</p>
+  </div>
+</main>
+{% endblock %}

@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}端末の登録{% endblock %}
+{% block body %}
+<header class="topbar"><span class="title">{{ settings.shop_name or "学祭飲食POS" }}</span></header>
+<main class="page">
+  <form class="card stack" id="login-form">
+    <h2>端末の登録</h2>
+    <div class="row" role="radiogroup" aria-label="役割">
+      <button type="button" class="grow btn-big" data-role="reception">PC1 受付</button>
+      <button type="button" class="grow btn-big" data-role="kitchen">PC2 厨房</button>
+    </div>
+    <label for="passcode">パスコード</label>
+    <input id="passcode" type="password" inputmode="numeric" autocomplete="current-password"
+           required autofocus style="font-size:1.6rem;text-align:center;letter-spacing:.3em">
+    <p id="login-error" class="error-text hidden"></p>
+    <button type="submit" class="btn-primary btn-big">登録して開く</button>
+    <p class="muted">パスコードはPC3の担当に聞いてください。登録はこの端末のChromeに記憶されます。</p>
+  </form>
+</main>
+{% endblock %}
+{% block scripts %}
+<script>
+  let role = {{ role|tojson }};
+  const btns = document.querySelectorAll("[data-role]");
+  const pick = (r) => { role = r; btns.forEach((b) => b.classList.toggle("active", b.dataset.role === r)); };
+  btns.forEach((b) => b.addEventListener("click", () => pick(b.dataset.role)));
+  pick(role);
+  document.getElementById("login-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const err = document.getElementById("login-error");
+    const submit = e.target.querySelector("[type=submit]");
+    submit.disabled = true;
+    err.classList.add("hidden");
+    try {
+      await POS.api("/api/session", { method: "POST",
+        body: { passcode: document.getElementById("passcode").value, role } });
+      location.href = "/" + role;
+    } catch (ex) {
+      err.textContent = ex.message;
+      err.classList.remove("hidden");
+      submit.disabled = false;
+    }
+  });
+</script>
+{% endblock %}

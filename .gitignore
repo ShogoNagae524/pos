@@ -1,0 +1,12 @@
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.venv/
+
+# DB・証明書・バックアップ
+data/
+.pytest_cache/
+.ruff_cache/

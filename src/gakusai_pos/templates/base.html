@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#111418">
+  <title>{% block title %}学祭POS{% endblock %}{% if settings.shop_name %} - {{ settings.shop_name }}{% endif %}</title>
+  <link rel="stylesheet" href="/static/style.css?v={{ v }}">
+  {% block head %}{% endblock %}
+</head>
+<body {% block body_attrs %}{% endblock %}>
+  <div id="conn-banner">サーバーとの接続が切れています。自動で再接続中…</div>
+  {% block body %}{% endblock %}
+  <script src="/static/common.js?v={{ v }}"></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>
