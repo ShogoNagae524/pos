@@ -10,3 +10,6 @@ wheels/
 data/
 .pytest_cache/
 .ruff_cache/
+
+# 学祭の売上記録（非公開）
+記録/
