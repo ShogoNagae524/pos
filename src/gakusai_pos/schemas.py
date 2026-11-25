@@ -3,21 +3,24 @@
 from __future__ import annotations
 
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, field_validator
 
-Status = Literal["waiting", "cooking", "delivered", "cancelled"]
+Status = Literal["waiting", "cooking", "ready", "delivered", "cancelled"]
+Category = Literal["food", "goods"]
 
 
 def _check_price(v: int) -> int:
-    if v <= 0 or v % 50 != 0:
-        raise ValueError("価格は50円の倍数で入力してください")
+    # マイナスは割引券（例 -50 = 50円引き）
+    if v == 0 or v % 50 != 0:
+        raise ValueError("価格は50円の倍数で入力してください（割引券はマイナス。0円は不可）")
     return v
 
 
 class SessionIn(BaseModel):
     passcode: str = Field(min_length=1, max_length=64)
-    role: Literal["reception", "kitchen"]
+    role: Literal["reception", "kitchen", "goods", "pickup"]
 
 
 class OrderItemIn(BaseModel):
@@ -47,6 +50,8 @@ class ProductIn(BaseModel):
     name: str = Field(min_length=1, max_length=40)
     price: int
     stock: int | None = Field(default=None, ge=0)
+    category: Category = "food"
+    needs_prep: bool = False  # 物販で、その場で作ってから渡す（待ち時間あり）
 
     _price = field_validator("price")(_check_price)
 
@@ -66,6 +71,8 @@ class ProductPatch(BaseModel):
     sold_out: bool | None = None
     stock: int | None = Field(default=None, ge=0)
     clear_stock: bool = False  # true で在庫上限を解除（NULL）
+    category: Category | None = None
+    needs_prep: bool | None = None
 
     @field_validator("price")
     @classmethod
@@ -91,6 +98,21 @@ class SettingsIn(BaseModel):
     test_mode: bool | None = None
     usb_backup_dir: str | None = Field(default=None, max_length=500)
     passcode: str | None = Field(default=None, min_length=4, max_length=64)
+    preorder_url: str | None = Field(default=None, max_length=300)
+
+    @field_validator("preorder_url")
+    @classmethod
+    def _preorder_url(cls, v: str | None) -> str | None:
+        # 空欄は「未設定」。お客様のスマホで開く公開ページなので https のURLだけを受け付ける
+        if v is None:
+            return None
+        v = v.strip()
+        if not v:
+            return ""
+        parts = urlsplit(v)
+        if parts.scheme != "https" or not parts.hostname or any(c.isspace() for c in v):
+            raise ValueError("事前注文ページのURLは https:// で始まるURLを入力してください")
+        return v
 
 
 class ManualOrderIn(BaseModel):
@@ -113,3 +135,4 @@ class ClosingIn(BaseModel):
     business_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
     counted_tickets: int = Field(ge=0)
     note: str = Field(default="", max_length=200)
+    category: Category | None = None  # 指定するとその区分（飲食・物販）だけで照合

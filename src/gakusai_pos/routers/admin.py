@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import io
 from datetime import datetime
+from typing import Literal
 
 import qrcode
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
 
 from .. import services as sv
@@ -53,20 +54,41 @@ async def info(request: Request):
     }
 
 
-@router.get("/qr.png")
-async def qr_png(data: str, box: int = 10):
-    if len(data) > 300:
-        raise HTTPException(400, "データが長すぎます")
+def _qr_png_bytes(data: str, box: int, border: int = 2) -> bytes:
     qr = qrcode.QRCode(
-        error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=max(2, min(box, 20)), border=2
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        box_size=max(2, min(box, 20)),
+        border=border,
     )
     qr.add_data(data)
     qr.make(fit=True)
     buf = io.BytesIO()
     qr.make_image(fill_color="black", back_color="white").save(buf, format="PNG")
+    return buf.getvalue()
+
+
+@router.get("/qr.png")
+async def qr_png(data: str, box: int = 10):
+    if len(data) > 300:
+        raise HTTPException(400, "データが長すぎます")
     return Response(
-        buf.getvalue(), media_type="image/png", headers={"Cache-Control": "max-age=3600"}
+        _qr_png_bytes(data, box),
+        media_type="image/png",
+        headers={"Cache-Control": "max-age=3600"},
     )
+
+
+@router.get("/preorder-qr.png")
+async def preorder_qr_png(request: Request, download: bool = False):
+    """事前注文ページの公開URL（設定）を入れた案内用QR。印刷できるよう大きめに作る。"""
+    url = get_setting(_db(request), "preorder_url", "")
+    if not url:
+        raise HTTPException(404, "事前注文ページのURLが設定されていません")
+    headers = {"Cache-Control": "no-store"}
+    if download:
+        headers["Content-Disposition"] = 'attachment; filename="preorder-qr.png"'
+    # 周りの余白（4マス）を規格どおり取り、どこに貼っても読めるようにする
+    return Response(_qr_png_bytes(url, 20, border=4), media_type="image/png", headers=headers)
 
 
 # ---------------------------------------------------------------- products
@@ -79,7 +101,15 @@ async def products(request: Request):
 
 @router.post("/products", status_code=201)
 async def add_product(body: ProductIn, request: Request):
-    product = sv.add_product(_db(request), body.name, body.price, body.stock, ADMIN)
+    product = sv.add_product(
+        _db(request),
+        body.name,
+        body.price,
+        body.stock,
+        ADMIN,
+        category=body.category,
+        needs_prep=body.needs_prep,
+    )
     await notify_products(request.app, [product])
     return product
 
@@ -107,6 +137,7 @@ async def get_settings(request: Request):
     s = public_settings(db)
     s["usb_backup_dir"] = get_setting(db, "usb_backup_dir", "")
     s["passcode_changed"] = get_setting(db, "passcode_changed") == "1"
+    s["preorder_url"] = get_setting(db, "preorder_url", "")
     return s
 
 
@@ -115,7 +146,7 @@ async def put_settings(body: SettingsIn, request: Request):
     db = _db(request)
     changed: dict = {}
     with Tx(db):
-        for key in ("shop_name", "day1", "day2", "usb_backup_dir"):
+        for key in ("shop_name", "day1", "day2", "usb_backup_dir", "preorder_url"):
             value = getattr(body, key)
             if value is None:
                 continue
@@ -176,8 +207,11 @@ async def orders(
     status: str | None = None,
     q: str | None = None,
     test: str = "all",
+    category: str | None = None,
 ):
-    return sv.search_orders(_db(request), date or None, status or None, q or None, test)
+    return sv.search_orders(
+        _db(request), date or None, status or None, q or None, test, category=category or None
+    )
 
 
 @router.post("/orders", status_code=201)
@@ -227,15 +261,29 @@ async def purge(body: PurgeIn, request: Request):
 
 
 @router.get("/summary")
-async def summary(request: Request, date: str | None = None):
-    return sv.summary(_db(request), date or None)
+async def summary(request: Request, date: str | None = None, category: str | None = None):
+    if category not in (None, "", "food", "goods"):
+        raise HTTPException(400, "category は food / goods のいずれかです")
+    return sv.summary(_db(request), date or None, category or None)
 
 
 @router.post("/closing")
 async def closing(body: ClosingIn, request: Request):
     return sv.record_closing(
-        _db(request), body.business_date, body.counted_tickets, body.note, ADMIN
+        _db(request), body.business_date, body.counted_tickets, body.note, ADMIN, body.category
     )
+
+
+@router.get("/sales-series")
+async def sales_series(
+    request: Request,
+    since: str = Query(pattern=r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$"),
+    until: str = Query(pattern=r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$"),
+    category: Literal["food", "goods"] | None = None,
+    trim: bool = False,
+):
+    """売上グラフ用：期間内の30分ごとの売上と累計。"""
+    return sv.sales_series(_db(request), since, until, category, trim)
 
 
 @router.get("/closings")

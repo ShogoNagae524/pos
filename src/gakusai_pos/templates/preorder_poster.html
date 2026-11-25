@@ -1,0 +1,57 @@
+<!doctype html>
+{#- 事前注文の案内ポスター（A4縦）。QRは設定した事前注文ページの公開URL。 -#}
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>事前注文ポスター{% if settings.shop_name %} - {{ settings.shop_name }}{% endif %}</title>
+  <style>
+    @page { size: A4 portrait; margin: 0; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: "Hiragino Sans", "Yu Gothic UI", "Meiryo", sans-serif; color: #000; background: #e5e7eb; }
+    .bar { padding: 12px 16px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; background: #111418; color: #fff; }
+    .bar button { font: inherit; font-weight: 700; min-height: 44px; padding: 0 18px; border-radius: 8px; border: 0; cursor: pointer; }
+    .poster {
+      width: 210mm; height: 297mm; margin: 12px auto; background: #fff;
+      padding: 18mm 16mm; display: flex; flex-direction: column; align-items: center; text-align: center;
+    }
+    .shop { font-size: 20pt; font-weight: 800; color: #333; min-height: 1em; }
+    h1 { font-size: 40pt; line-height: 1.2; margin: 6mm 0 2mm; font-weight: 900; }
+    .sub { font-size: 18pt; font-weight: 700; margin: 0 0 8mm; }
+    .qr { width: 115mm; height: 115mm; image-rendering: pixelated; }
+    .url { font-family: Consolas, monospace; font-size: 12pt; margin-top: 3mm; word-break: break-all; color: #333; }
+    ol { text-align: left; font-size: 17pt; font-weight: 700; line-height: 1.6; margin: 9mm 0 0; padding-left: 1.4em; }
+    .note { margin-top: auto; font-size: 12pt; color: #333; border-top: 1px solid #999; padding-top: 4mm; width: 100%; }
+    .empty { padding: 40px; font-size: 1.2rem; }
+    @media print {
+      body { background: #fff; }
+      .bar { display: none; }
+      .poster { margin: 0; }
+    }
+  </style>
+</head>
+<body>
+  {% if url %}
+  <div class="bar">
+    <strong>事前注文の案内ポスター（A4縦）</strong>
+    <button type="button" onclick="window.print()">印刷する</button>
+    <span>印刷の設定で「余白：なし」「倍率：100%」にしてください。</span>
+  </div>
+  <div class="poster">
+    <div class="shop">{{ settings.shop_name }}</div>
+    <h1>並んでいる間に<br>スマホで事前注文</h1>
+    <p class="sub">QRコードを読んで、食べたいものを選んでください</p>
+    <img class="qr" src="/admin/api/preorder-qr.png" alt="事前注文ページのQRコード">
+    <div class="url">{{ url }}</div>
+    <ol>
+      <li>QRコードを読んで、商品と個数を選ぶ</li>
+      <li>「QRコードを作る」を押す</li>
+      <li>受付でスマホの画面を見せ、金券でお支払い（割引券をお持ちの方は係の者にお渡しください）</li>
+    </ol>
+    <p class="note">お支払いは受付で行います（この時点では注文は確定しません）。<br>売り切れの場合は受付でお知らせします。スマホがなくても、受付で直接ご注文いただけます。</p>
+  </div>
+  {% else %}
+  <p class="empty">事前注文ページのURLが設定されていません。管理画面の「商品」→「事前注文ページ」でURLを保存してください。</p>
+  {% endif %}
+</body>
+</html>

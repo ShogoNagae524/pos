@@ -210,7 +210,7 @@ const POS = (() => {
     } catch {}
   }
 
-  const STATUS_LABEL = { waiting: "未着手", cooking: "調理中", delivered: "受渡済", cancelled: "取消" };
+  const STATUS_LABEL = { waiting: "準備中", cooking: "準備中", ready: "受渡可能", delivered: "受渡済", cancelled: "取消" };
 
   return { api, ApiError, connect, sound, toast, esc, yen, tickets, hhmm, elapsed, serverNow,
     uuid, store, keepAwake, STATUS_LABEL, TICKET };

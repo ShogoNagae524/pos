@@ -7,34 +7,28 @@
   const api = (path, opts = {}) => POS.api(path, { ...opts, role: ROLE });
   const LATE_MS = 10 * 60 * 1000; // 10分を超えたら経過時間を赤く
 
-  let orders = new Map(); // 画面に出す注文（未着手・調理中・未確認の取消）
+  let orders = new Map(); // 画面に出す注文（準備中・未確認の取消）
   let products = [];
   const fresh = new Map(); // 新着の強調表示 id -> 期限
-  let tab = "waiting";
   let busy = new Set(); // 送信中の注文ID（ボタンの連打防止）
 
   // ============================================================ 描画
-  function column(o) {
-    if (o.status === "cancelled") return o.started_at ? "cooking" : "waiting";
-    return o.status;
+  function isShown(o) {
+    if (o.category === "goods") return false; // 物販はその場で渡すので厨房には出さない
+    return o.status === "waiting" || (o.status === "cancelled" && !o.cancel_ack_at);
   }
 
-  function isShown(o) {
-    return o.status === "waiting" || o.status === "cooking" ||
-      (o.status === "cancelled" && !o.cancel_ack_at);
-  }
+  // 割引券（価格がマイナスの行）は作る物ではないので厨房には出さない
+  const goodsOf = (o) => o.items.filter((i) => i.unit_price > 0);
 
   function cardHtml(o) {
-    const items = o.items.map((i) =>
+    const items = goodsOf(o).map((i) =>
       `<li>${POS.esc(i.name)}<span class="q num">×${i.qty}</span></li>`).join("");
     const isNew = fresh.has(o.id) && fresh.get(o.id) > Date.now();
     const dis = busy.has(o.id) ? "disabled" : "";
     let acts = "";
     if (o.status === "waiting") {
-      acts = `<button type="button" class="main btn-primary" data-act="start" data-id="${o.id}" ${dis}>調理開始</button>`;
-    } else if (o.status === "cooking") {
-      acts = `<button type="button" data-act="back" data-id="${o.id}" ${dis}>戻す</button>
-              <button type="button" class="main btn-ok" data-act="deliver" data-id="${o.id}" ${dis}>受渡完了</button>`;
+      acts = `<button type="button" class="main btn-ok" data-act="deliver" data-id="${o.id}" ${dis}>受渡完了</button>`;
     } else if (o.status === "cancelled") {
       acts = `<button type="button" class="main btn-danger" data-act="ack" data-id="${o.id}" ${dis}>確認（作らない）</button>`;
     }
@@ -52,33 +46,25 @@
   }
 
   function render() {
-    const cols = { waiting: [], cooking: [] };
-    for (const o of [...orders.values()].sort((a, b) => a.id - b.id)) {
-      if (isShown(o)) cols[column(o)].push(o);
-    }
-    for (const k of ["waiting", "cooking"]) {
-      const list = cols[k];
-      $(`list-${k}`).innerHTML = list.length
-        ? list.map(cardHtml).join("")
-        : `<div class="empty-col">${k === "waiting" ? "未着手の注文はありません" : "調理中の注文はありません"}</div>`;
-      const n = list.filter((o) => o.status !== "cancelled").length;
-      $(`count-${k}`).textContent = n;
-      $(`tab-${k}`).textContent = n;
-    }
+    const list = [...orders.values()].filter(isShown).sort((a, b) => a.id - b.id);
+    $("list-waiting").innerHTML = list.length
+      ? list.map(cardHtml).join("")
+      : `<div class="empty-col">準備中の注文はありません</div>`;
+    $("count-waiting").textContent = list.filter((o) => o.status !== "cancelled").length;
     renderSummary();
     tickElapsed();
   }
 
-  // K-08 商品別の未調理数
+  // K-08 商品別の準備中の数
   function renderSummary() {
     const sum = new Map();
     for (const o of orders.values()) {
-      if (o.status !== "waiting" && o.status !== "cooking") continue;
-      for (const i of o.items) sum.set(i.name, (sum.get(i.name) || 0) + i.qty);
+      if (o.status !== "waiting") continue;
+      for (const i of goodsOf(o)) sum.set(i.name, (sum.get(i.name) || 0) + i.qty);
     }
     $("kd-summary").innerHTML = sum.size
       ? [...sum.entries()].map(([n, q]) => `<span class="chip">${POS.esc(n)}<b class="num">${q}</b></span>`).join("")
-      : `<span class="muted">未調理の商品はありません</span>`;
+      : `<span class="muted">準備中の商品はありません</span>`;
   }
 
   function tickElapsed() {
@@ -93,9 +79,7 @@
 
   // ============================================================ 操作
   const ACTIONS = {
-    start: { current: "waiting", to: "cooking" },
-    deliver: { current: "cooking", to: "delivered" },
-    back: { current: "cooking", to: "waiting" },
+    deliver: { current: "waiting", to: "delivered" },
   };
 
   async function changeStatus(id, current, to) {
@@ -136,17 +120,9 @@
     else orders.delete(o.id);
   }
 
-  // タブ（縦長の画面）
-  $("kd-tabs").addEventListener("click", (e) => {
-    const b = e.target.closest("[data-tab]");
-    if (!b) return;
-    tab = b.dataset.tab;
-    document.querySelectorAll("#kd-tabs [data-tab]").forEach((x) => x.classList.toggle("active", x === b));
-    $("col-waiting").classList.toggle("show", tab === "waiting");
-    $("col-cooking").classList.toggle("show", tab === "cooking");
-  });
-
   // ============================================================ 売切切替（K-09）
+  const foodOnly = (list) => list.filter((p) => p.category === "food");
+
   function renderSoldOut() {
     $("soldout-list").innerHTML = products.length ? products.map((p) => `
       <li><span>${POS.esc(p.name)}${p.stock !== null ? `<small class="muted">（残り${p.stock}）</small>` : ""}</span>
@@ -156,7 +132,7 @@
   }
   $("btn-soldout").addEventListener("click", async () => {
     $("ov-soldout").classList.remove("hidden");
-    try { products = await api("/api/products"); } catch {}
+    try { products = foodOnly(await api("/api/products")); } catch {}
     renderSoldOut();
   });
   $("soldout-list").addEventListener("click", async (e) => {
@@ -182,9 +158,9 @@
         <span class="no num">${o.call_no}</span>
         <span class="info">
           <span class="muted num">会計 ${POS.hhmm(o.paid_at)} ／ 受渡 ${POS.hhmm(o.delivered_at)}</span>
-          <span>${o.items.map((i) => `${POS.esc(i.name)}×${i.qty}`).join("、")}</span>
+          <span>${goodsOf(o).map((i) => `${POS.esc(i.name)}×${i.qty}`).join("、")}</span>
         </span>
-        <span class="acts"><button type="button" class="btn-small" data-id="${o.id}">調理中に戻す</button></span>
+        <span class="acts"><button type="button" class="btn-small" data-id="${o.id}">準備中に戻す</button></span>
       </li>`).join("") : `<li class="muted" style="padding:16px">まだありません</li>`;
   }
   $("btn-recent").addEventListener("click", async () => {
@@ -196,7 +172,7 @@
     const b = e.target.closest("[data-id]");
     if (!b) return;
     b.disabled = true;
-    await changeStatus(Number(b.dataset.id), "delivered", "cooking");
+    await changeStatus(Number(b.dataset.id), "delivered", "waiting");
     await loadRecent().catch(() => {});
   });
 
@@ -229,7 +205,7 @@
     } else if (msg.type === "product_updated") {
       const p = msg.product;
       products = products.filter((x) => x.id !== p.id);
-      if (!p.deleted) products.push(p);
+      if (!p.deleted && p.category === "food") products.push(p);
       products.sort((a, b) => a.sort_order - b.sort_order || a.id - b.id);
       renderSoldOut();
     } else if (msg.type === "settings_updated") {
@@ -242,7 +218,7 @@
     try {
       const [list, prods] = await Promise.all([api("/api/orders?status=open"), api("/api/products")]);
       orders = new Map(list.map((o) => [o.id, o]));
-      products = prods;
+      products = foodOnly(prods);
       render();
       renderSoldOut();
       if (recentOpen) await loadRecent();

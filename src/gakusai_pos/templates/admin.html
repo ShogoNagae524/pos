@@ -12,6 +12,7 @@
   <button type="button" data-tab="products">商品</button>
   <button type="button" data-tab="orders">注文</button>
   <button type="button" data-tab="sales">売上・レジ締め</button>
+  <button type="button" data-tab="charts">売上グラフ</button>
   <button type="button" data-tab="logs">操作ログ</button>
   <button type="button" data-tab="settings">設定</button>
 </nav>
@@ -22,7 +23,7 @@
     <div id="home-warnings"></div>
     <div class="ad-grid">
       <div class="card">
-        <h2>PC1・PC2で開くURL</h2>
+        <h2>PC1・PC2・PC4・PC5で開くURL</h2>
         <div id="urls"></div>
         <p class="muted">スマホ・タブレットはQRを読むだけで開けます。証明書の警告が出たら「詳細設定 → アクセスする」。</p>
       </div>
@@ -49,19 +50,43 @@
     <form class="card" id="product-form">
       <h2>商品の追加</h2>
       <div class="row">
+        <select name="category" aria-label="区分"><option value="food">飲食（PC1→厨房）</option><option value="goods">物販（PC4）</option></select>
         <input name="name" placeholder="商品名" required maxlength="40" class="grow" style="min-width:180px">
-        <input name="price" type="number" placeholder="価格（円）" required min="50" step="50" style="width:140px">
+        <input name="price" type="number" placeholder="価格（円）" required step="50" style="width:140px" title="割引券はマイナス（例 -50）">
         <input name="stock" type="number" placeholder="作れる数（任意）" min="0" style="width:170px">
+        <label id="needs-prep-label" class="hidden" title="その場で作ってから渡す物販（3Dプリントなど）"><input type="checkbox" name="needs_prep" style="min-height:auto"> 待ち時間あり（その場で製作）</label>
         <button type="submit" class="btn-primary">追加</button>
       </div>
-      <p class="muted">価格は50円の倍数のみ。商品コード（M001…）と表示順は自動で付きます。作れる数を入れると売れた分だけ減り、0で自動的に売切になります。</p>
+      <p class="muted">価格は50円の倍数のみ。<strong>割引券はマイナスの価格で登録</strong>します（例 <code>-50</code> で50円引き。区分は使う側に合わせる）。割引券だけの会計や、合計がマイナスになる会計はできません。商品コード（M001…）と表示順は自動で付きます。作れる数（物販は在庫数）を入れると売れた分だけ減り、0で自動的に売切になります。飲食はPC1受付に出て厨房へ送られ、物販はPC4物販に出てその場で受渡済になります。物販で「待ち時間あり」にした商品を含む注文は準備中から始まり、PC4で「受け渡し可能」にするとPC5の受渡表示に番号が出ます。</p>
     </form>
     <div class="card">
       <div class="row" style="margin-bottom:8px">
         <h2 class="grow" style="margin:0">商品一覧</h2>
-        <a class="btn" href="/admin/print" target="_blank">QRカード印刷</a>
       </div>
       <div class="table-wrap"><table class="data" id="product-table"></table></div>
+    </div>
+    <div class="card">
+      <div class="row" style="margin-bottom:8px">
+        <h2 class="grow" style="margin:0">事前注文ページ（お客様用）</h2>
+        <a class="btn" href="/admin/preorder" target="_blank">プレビュー</a>
+        <a class="btn btn-primary" href="/admin/preorder?download=1">書き出す（preorder.html）</a>
+      </div>
+      <p class="muted">お客様がスマホで飲食の商品を選び、QRコードを作るページです。受付（PC1）でそのQRを読むとカートに入り、あとはいつもどおり店員が確認して会計します（QRだけで注文は確定しません）。書き出した preorder.html は<strong>このサーバーとは通信しない</strong>1枚きりのページなので、GitHub Pages など別の場所に置いてURLをポスター等で案内してください（お客様をこのサーバーにアクセスさせないため）。メニューは書き出した時点のものです。商品・価格を変えたら書き出し直してください（売切や価格の違いは受付で読み込んだときに表示されます）。</p>
+      <h3 style="margin-top:16px">案内用のQRコード</h3>
+      <form class="row" id="preorder-url-form">
+        <input name="preorder_url" type="url" class="grow" style="min-width:260px" maxlength="300"
+          placeholder="preorder.html を置いた公開URL（例: https://example.github.io/preorder/）" aria-label="事前注文ページの公開URL">
+        <button type="submit">保存</button>
+      </form>
+      <p class="muted">置いた先のURLを入れて保存すると、お客様がそのページを開くためのQRコードを作れます。URLを変えたらQRも作り直してください。</p>
+      <div id="preorder-qr" class="row hidden" style="align-items:flex-start;gap:16px">
+        <img id="preorder-qr-img" alt="事前注文ページのQRコード" width="160" height="160" style="image-rendering:pixelated;border:1px solid var(--border);border-radius:8px;background:#fff">
+        <div style="display:flex;flex-direction:column;gap:8px">
+          <a class="btn" id="preorder-qr-open" target="_blank" rel="noopener">URLを開いて確認</a>
+          <a class="btn btn-primary" href="/admin/api/preorder-qr.png?download=1">QR画像を保存（PNG）</a>
+          <a class="btn" href="/admin/preorder/poster" target="_blank">案内ポスターを印刷（A4）</a>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -72,10 +97,11 @@
       <form class="row" id="order-filter">
         <select name="date" id="order-date"><option value="">全営業日</option></select>
         <select name="status">
-          <option value="">全状態</option><option value="waiting">未着手</option><option value="cooking">調理中</option>
+          <option value="">全状態</option><option value="waiting">準備中</option><option value="ready">受渡可能（物販）</option>
           <option value="delivered">受渡済</option><option value="cancelled">取消</option>
         </select>
         <select name="test"><option value="all">テスト含む</option><option value="real">本番のみ</option><option value="test">テストのみ</option></select>
+        <select name="category"><option value="">飲食・物販</option><option value="food">飲食のみ</option><option value="goods">物販のみ</option></select>
         <input name="q" placeholder="呼出番号 / 商品名" style="width:180px">
         <button type="submit">検索</button>
         <a class="btn" href="/admin/api/export/orders.csv">注文CSV</a>
@@ -91,9 +117,10 @@
         <label>営業日 <input type="date" name="business_date" required></label>
         <label>会計時刻 <input type="time" name="paid_time"></label>
         <label>呼出番号 <input type="number" name="call_no" min="0" style="width:110px" placeholder="自動"></label>
-        <label>状態 <select name="status"><option value="delivered">受渡済</option><option value="waiting">未着手（厨房へ送る）</option></select></label>
+        <label>状態 <select name="status"><option value="delivered">受渡済</option><option value="waiting">準備中（厨房へ送る）</option></select></label>
       </div>
       <div id="manual-items" class="row" style="margin-top:10px"></div>
+      <p class="muted">飲食と物販は1件に混ぜられません。物販は状態の選択に関係なく受渡済で登録されます（番号は物販の受付番号）。</p>
       <div class="row" style="margin-top:10px">
         <strong id="manual-total" class="grow num"></strong>
         <button type="submit" class="btn-primary">登録</button>
@@ -117,6 +144,7 @@
   <section data-pane="sales" class="hidden">
     <div class="row" style="margin-bottom:12px">
       <label>集計対象 <select id="sales-date"><option value="">全期間</option></select></label>
+      <label>区分 <select id="sales-category"><option value="">飲食・物販</option><option value="food">飲食のみ</option><option value="goods">物販のみ</option></select></label>
       <button type="button" id="btn-sales-reload">更新</button>
     </div>
     <div class="stat-row" id="sales-stats"></div>
@@ -129,6 +157,7 @@
       <h2>レジ締め</h2>
       <div class="row">
         <label>営業日 <input type="date" name="business_date" id="closing-date" required></label>
+        <label>区分 <select name="category" id="closing-category"><option value="">飲食・物販の合計</option><option value="food">飲食のみ</option><option value="goods">物販のみ</option></select></label>
         <span id="closing-expected" class="num" style="font-weight:800"></span>
       </div>
       <div class="row" style="margin-top:10px">
@@ -142,12 +171,39 @@
     </form>
   </section>
 
+  <!-- ============================================================ 売上グラフ -->
+  <section data-pane="charts" class="hidden">
+    <form class="row chart-filter" id="chart-filter">
+      <label>期間 <select id="chart-preset"></select></label>
+      <label>から <input type="datetime-local" id="chart-since" step="1800" required></label>
+      <label>まで <input type="datetime-local" id="chart-until" step="1800" required></label>
+      <label>区分 <select id="chart-category"><option value="">飲食・物販</option><option value="food">飲食のみ</option><option value="goods">物販のみ</option></select></label>
+      <button type="submit">表示</button>
+    </form>
+    <p class="muted" style="margin:8px 0 12px">取消・テスト注文は含みません。営業日を選ぶと、売上のある時間帯だけを表示します。新しい会計があると自動で更新します。</p>
+    <div id="chart-body">
+      <div class="stat-row" id="chart-stats"></div>
+      <div class="card viz-card">
+        <h2>累計売上</h2>
+        <div class="viz" id="chart-cumulative"></div>
+      </div>
+      <div class="card viz-card">
+        <h2>30分ごとの売上</h2>
+        <div class="viz" id="chart-bars"></div>
+      </div>
+      <details class="card viz-card">
+        <summary>表で見る</summary>
+        <div class="table-wrap" style="max-height:50vh;overflow:auto;margin-top:8px"><table class="data" id="chart-table"></table></div>
+      </details>
+    </div>
+  </section>
+
   <!-- ============================================================ ログ -->
   <section data-pane="logs" class="hidden">
     <div class="card">
       <form class="row" id="log-filter">
         <select name="terminal">
-          <option value="">全端末</option><option>PC1受付</option><option>PC2厨房</option><option>PC3管理</option>
+          <option value="">全端末</option><option>PC1受付</option><option>PC2厨房</option><option>PC3管理</option><option>PC4物販</option><option>PC5受渡表示</option>
         </select>
         <select name="kind" id="log-kind"><option value="">全種類</option></select>
         <label>から <input type="datetime-local" name="since"></label>
@@ -178,12 +234,13 @@
           <input id="s-pass2" type="password" autocomplete="new-password" placeholder="もう一度">
         </div>
       </div>
-      <p class="muted">パスコードを変えると、PC1・PC2は登録し直しになります。</p>
+      <p class="muted">パスコードを変えると、PC1・PC2・PC4・PC5は登録し直しになります。</p>
       <div class="row"><button type="submit" class="btn-primary">保存</button></div>
     </form>
   </section>
 </main>
 {% endblock %}
 {% block scripts %}
+<script src="/static/charts.js?v={{ v }}"></script>
 <script src="/static/admin.js?v={{ v }}"></script>
 {% endblock %}

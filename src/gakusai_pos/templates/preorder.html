@@ -1,0 +1,232 @@
+<!doctype html>
+{#- お客様向けの事前注文ページ。管理画面から書き出す1枚きりのHTMLで、POSのサーバーとは一切通信しない。
+    GitHub Pages など別の場所に置いて、そのURLをお客様に案内する。
+    メニューは書き出した時点のもの。売切・価格は受付でQRを読んだときに最新の情報で確かめる。 -#}
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>事前注文{% if settings.shop_name %} - {{ settings.shop_name }}{% endif %}</title>
+  <style>
+    :root {
+      --bg: #f4f5f7; --surface: #fff; --text: #111418; --muted: #4a525c; --border: #c9cfd7;
+      --primary: #0a4fc2; --primary-text: #fff; --warn: #9a4d00; --warn-bg: #fff1dc;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; }
+    body {
+      background: var(--bg); color: var(--text); line-height: 1.5;
+      font-family: "Hiragino Sans", "Yu Gothic UI", "Meiryo", "Noto Sans JP", system-ui, sans-serif;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .wrap { max-width: 560px; margin: 0 auto; padding: 16px 16px 120px; }
+    header h1 { font-size: 1.4rem; margin: 0; }
+    header .shop { color: var(--muted); font-weight: 700; }
+    .how { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin: 14px 0; }
+    .how ol { margin: 0; padding-left: 1.3em; }
+    .how .note { color: var(--muted); font-size: .9rem; margin: 8px 0 0; }
+    .menu { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+    .item {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+      padding: 10px 12px; display: flex; align-items: center; gap: 10px;
+    }
+    .item.on { border-color: var(--primary); box-shadow: inset 4px 0 0 var(--primary); }
+    .item .info { flex: 1; min-width: 0; }
+    .item .name { font-weight: 800; font-size: 1.1rem; overflow-wrap: anywhere; }
+    .item .price { color: var(--muted); font-variant-numeric: tabular-nums; }
+    .stepper { display: flex; align-items: center; gap: 4px; }
+    .stepper button {
+      width: 44px; height: 44px; font-size: 1.4rem; font-weight: 800; border-radius: 8px;
+      border: 1px solid var(--border); background: #fff; color: var(--text); cursor: pointer;
+    }
+    .stepper button:disabled { opacity: .35; cursor: default; }
+    .stepper .qty { min-width: 2em; text-align: center; font-size: 1.3rem; font-weight: 800; font-variant-numeric: tabular-nums; }
+    .bar {
+      position: fixed; left: 0; right: 0; bottom: 0; background: var(--surface);
+      border-top: 1px solid var(--border); padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
+    }
+    .bar-in { max-width: 560px; margin: 0 auto; display: flex; align-items: center; gap: 12px; }
+    .bar .sum { flex: 1; font-weight: 800; font-size: 1.2rem; font-variant-numeric: tabular-nums; }
+    .bar .sum small { display: block; font-size: .85rem; color: var(--muted); font-weight: 700; }
+    .btn {
+      min-height: 48px; padding: 0 18px; border-radius: 10px; font: inherit; font-weight: 800;
+      border: 1px solid var(--border); background: #fff; color: var(--text); cursor: pointer;
+    }
+    .btn-primary { background: var(--primary); border-color: var(--primary); color: var(--primary-text); }
+    .btn:disabled { opacity: .45; cursor: default; }
+    .hidden { display: none !important; }
+    /* QR表示 */
+    .qr-view { text-align: center; }
+    .qr-view .lead { font-weight: 800; font-size: 1.1rem; margin: 8px 0; }
+    .qr-box { background: #fff; padding: 12px; border-radius: 12px; border: 1px solid var(--border); display: inline-block; width: min(100%, 360px); }
+    .qr-box img { display: block; width: 100%; height: auto; image-rendering: pixelated; }
+    .qr-id { font-family: ui-monospace, Consolas, monospace; font-size: 1.2rem; font-weight: 800; letter-spacing: .1em; margin-top: 6px; }
+    .summary { text-align: left; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; margin: 14px 0; }
+    .summary table { width: 100%; border-collapse: collapse; }
+    .summary td { padding: 4px 0; }
+    .summary td.n { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; padding-left: 8px; }
+    .summary .total td { border-top: 1px solid var(--border); font-weight: 800; padding-top: 8px; }
+    .warn { background: var(--warn-bg); color: var(--warn); border-radius: 10px; padding: 10px 14px; font-weight: 700; text-align: left; }
+    .actions { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin-top: 14px; }
+    footer { color: var(--muted); font-size: .8rem; margin-top: 20px; }
+    .sns { margin-top: 24px; text-align: center; }
+    .sns a {
+      display: inline-flex; align-items: center; gap: 8px; min-height: 48px; padding: 0 18px;
+      border-radius: 10px; border: 1px solid var(--border); background: var(--surface);
+      color: var(--text); font-weight: 800; text-decoration: none;
+    }
+    .sns svg { width: 22px; height: 22px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>事前注文</h1>
+      {% if settings.shop_name %}<div class="shop">{{ settings.shop_name }}</div>{% endif %}
+    </header>
+
+    <section id="pick">
+      <div class="how">
+        <ol>
+          <li>食べたいものと個数を選ぶ</li>
+          <li>「QRコードを作る」を押す</li>
+          <li>受付でQRコードの画面を見せ、金券でお支払い（<strong>割引券をお持ちの方は、このとき係の者にお渡しください</strong>）</li>
+        </ol>
+        <p class="note">この画面ではまだ注文は確定しません。お支払いが済んだ時点で注文になります。売り切れや価格の変更があった場合は受付でお知らせします。</p>
+      </div>
+      {% if menu %}
+      <ul class="menu" id="menu"></ul>
+      {% else %}
+      <p class="warn">いまは事前注文できる商品がありません。</p>
+      {% endif %}
+    </section>
+
+    <section id="qr" class="qr-view hidden">
+      <p class="lead">受付でこの画面を見せてください</p>
+      <div class="qr-box"><img id="qr-img" alt="事前注文のQRコード"></div>
+      <div class="qr-id" id="qr-id"></div>
+      <p class="warn" style="margin-top:12px">画面を明るくして、受付のカメラに向けてください。お支払い（金券）は受付で行います。<br><strong>割引券をお持ちの方は、係の者にお渡しください。</strong></p>
+      <div class="summary"><table id="qr-lines"></table></div>
+      <div class="actions">
+        <button type="button" class="btn" id="btn-edit">戻って変更する</button>
+        <button type="button" class="btn" id="btn-reset">最初からやり直す</button>
+      </div>
+    </section>
+
+    {% if instagram_url %}
+    <div class="sns">
+      <a href="{{ instagram_url }}" target="_blank" rel="noopener noreferrer">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="5"/><circle cx="12" cy="12" r="4"/><circle cx="17.5" cy="6.5" r="1" fill="currentColor" stroke="none"/></svg>
+        サークルのInstagram
+      </a>
+    </div>
+    {% endif %}
+    <footer>メニュー更新：{{ exported_at }}</footer>
+  </div>
+
+  <div class="bar" id="bar">
+    <div class="bar-in">
+      <div class="sum"><span id="sum">0円</span><small id="sum-detail">商品を選んでください</small></div>
+      <button type="button" class="btn btn-primary" id="btn-make" disabled>QRコードを作る</button>
+    </div>
+  </div>
+
+  <script>{{ qrcode_js|safe }}</script>
+  <script>{{ preorder_code_js|safe }}</script>
+  <script>
+  "use strict";
+  (() => {
+    const MENU = {{ menu|tojson }};
+    const TICKET = 50;
+    const KEY = "gpos.preorder." + {{ menu_stamp|tojson }};
+    const $ = (id) => document.getElementById(id);
+    const yen = (n) => n.toLocaleString("ja-JP") + "円";
+    const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+    // 選んだ個数 code -> qty。ページを開き直しても残す（保存できない環境でも動く）
+    let qty = {};
+    try { qty = JSON.parse(localStorage.getItem(KEY) || "{}") || {}; } catch (e) { qty = {}; }
+    for (const code of Object.keys(qty)) {
+      if (!MENU.some((m) => m.code === code)) delete qty[code];
+    }
+    function save() { try { localStorage.setItem(KEY, JSON.stringify(qty)); } catch (e) {} }
+
+    function chosen() {
+      return MENU.filter((m) => qty[m.code] > 0).map((m) => ({ ...m, qty: qty[m.code] }));
+    }
+
+    function renderMenu() {
+      const ul = $("menu");
+      if (!ul) return;
+      ul.innerHTML = MENU.map((m) => {
+        const n = qty[m.code] || 0;
+        return `<li class="item${n ? " on" : ""}">
+          <div class="info"><div class="name">${esc(m.name)}</div>
+            <div class="price">${yen(m.price)}（金券${m.price / TICKET}枚）</div></div>
+          <div class="stepper">
+            <button type="button" data-code="${esc(m.code)}" data-d="-1" aria-label="${esc(m.name)}を1つ減らす"${n ? "" : " disabled"}>−</button>
+            <span class="qty">${n}</span>
+            <button type="button" data-code="${esc(m.code)}" data-d="1" aria-label="${esc(m.name)}を1つ増やす"${n >= PreorderCode.MAX_QTY ? " disabled" : ""}>＋</button>
+          </div></li>`;
+      }).join("");
+      const lines = chosen();
+      const total = lines.reduce((s, l) => s + l.price * l.qty, 0);
+      const count = lines.reduce((s, l) => s + l.qty, 0);
+      $("sum").textContent = yen(total);
+      $("sum-detail").textContent = count ? `${count}点・金券${total / TICKET}枚` : "商品を選んでください";
+      $("btn-make").disabled = count === 0;
+    }
+
+    const menuEl = $("menu");
+    if (menuEl) menuEl.addEventListener("click", (e) => {
+      const b = e.target.closest("button[data-code]");
+      if (!b) return;
+      const code = b.dataset.code;
+      const n = Math.max(0, Math.min((qty[code] || 0) + Number(b.dataset.d), PreorderCode.MAX_QTY));
+      if (n) qty[code] = n; else delete qty[code];
+      save();
+      renderMenu();
+    });
+
+    function showQr() {
+      const lines = chosen().slice(0, PreorderCode.MAX_LINES);
+      if (!lines.length) return;
+      const total = lines.reduce((s, l) => s + l.price * l.qty, 0);
+      const id = PreorderCode.newId();
+      const data = PreorderCode.build(id, total, lines);
+      const qr = qrcode(0, "M");
+      qr.addData(data);
+      qr.make();
+      $("qr-img").src = qr.createDataURL(8, 4);
+      $("qr-id").textContent = "注文ID " + id;
+      $("qr-lines").innerHTML = lines.map((l) =>
+        `<tr><td>${esc(l.name)}</td><td class="n">×${l.qty}</td><td class="n">${yen(l.price * l.qty)}</td></tr>`).join("")
+        + `<tr class="total"><td>合計</td><td class="n"></td><td class="n">${yen(total)}（金券${total / TICKET}枚）</td></tr>`;
+      $("pick").classList.add("hidden");
+      $("bar").classList.add("hidden");
+      $("qr").classList.remove("hidden");
+      window.scrollTo(0, 0);
+    }
+
+    function showPick() {
+      $("qr").classList.add("hidden");
+      $("pick").classList.remove("hidden");
+      $("bar").classList.remove("hidden");
+      renderMenu();
+    }
+
+    $("btn-make").addEventListener("click", showQr);
+    $("btn-edit").addEventListener("click", showPick);
+    $("btn-reset").addEventListener("click", () => {
+      if (!confirm("選んだ商品をすべて消して、最初からやり直しますか？")) return;
+      qty = {};
+      save();
+      showPick();
+    });
+
+    renderMenu();
+  })();
+  </script>
+</body>
+</html>

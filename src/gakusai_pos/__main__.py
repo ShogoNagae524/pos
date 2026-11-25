@@ -35,7 +35,7 @@ def _print_passcode(passcode: str | None) -> None:
     if passcode:
         print("=" * 60)
         print(f"  初期パスコード: {passcode}")
-        print("  （PC1・PC2の接続に使います。管理画面の「設定」で変更してください）")
+        print("  （PC1・PC2・PC4・PC5の接続に使います。管理画面の「設定」で変更してください）")
         print("=" * 60)
 
 
@@ -70,7 +70,7 @@ def cmd_serve(args) -> None:
         print("  ※ ネットワークのIPアドレスが見つかりません。Wi-Fiの接続を確認してください")
     for ip in ips:
         url = f"{scheme}://{ip}:{args.port}/"
-        print(f"  受付・厨房: {url}")
+        print(f"  受付・厨房・物販: {url}")
     if ips:
         _print_qr(f"{scheme}://{ips[0]}:{args.port}/")
     _print_passcode(app.state.initial_passcode)
@@ -190,7 +190,7 @@ def cmd_reset_passcode(args) -> None:
         set_setting(conn, "passcode_changed", "1")
         log_event(conn, "PC3管理", "settings_updated", None, {"passcode": "（変更）"})
     conn.close()
-    print("パスコードを変更しました。PC1・PC2は再登録が必要です")
+    print("パスコードを変更しました。PC1・PC2・PC4・PC5は再登録が必要です")
 
 
 def main(argv: list[str] | None = None) -> None:

@@ -11,6 +11,7 @@ from .. import services as sv
 from ..auth import (
     COOKIE_MAX_AGE,
     COOKIE_NAME,
+    ROLE_CATEGORY,
     ROLES,
     Terminal,
     make_token,
@@ -114,12 +115,14 @@ async def orders(
     term: Terminal = Depends(require_terminal),
 ):
     db = db_of(request)
+    category = ROLE_CATEGORY.get(term.role, "food")
     if status == "open":
-        return sv.open_orders(db)
+        return sv.open_orders(db, category)
     if status == "delivered":
-        return sv.recent_delivered(db, min(limit, 50))
+        return sv.recent_delivered(db, min(limit, 50), category)
     if status == "day":
         from ..db import today_str
 
-        return sv.orders_of_day(db, date or today_str())
+        # 受付は飲食、物販は物販の注文だけを見る
+        return sv.orders_of_day(db, date or today_str(), category=ROLE_CATEGORY.get(term.role))
     raise HTTPException(400, "status は open / delivered / day のいずれかです")

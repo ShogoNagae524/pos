@@ -6,25 +6,48 @@ import csv
 import io
 import json
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from .db import Tx, get_setting, log_event, now_str, set_setting, today_str
 
 TICKET = 50  # 学内通貨1枚の金額
 
 STATUS_LABEL = {
-    "waiting": "未着手",
-    "cooking": "調理中",
+    "waiting": "準備中",
+    "cooking": "準備中",  # 以前のDBの「調理中」。起動時に waiting へ移す
+    "ready": "受渡可能",
     "delivered": "受渡済",
     "cancelled": "取消",
 }
+# 飲食・物販とも waiting を「準備中」と呼ぶ
+GOODS_STATUS_LABEL = STATUS_LABEL
 
-# (現在, 次) -> 種類。前に進む操作と、1段階戻す操作（K-05）
+# 商品・注文の区分。物販は、準備が要らない商品だけなら会計した時点で受渡済にする
+CATEGORY_LABEL = {"food": "飲食", "goods": "物販"}
+
+# 区分 -> {(現在, 次) -> 種類}。前に進む操作と、1段階戻す操作（K-05）
 TRANSITIONS = {
-    ("waiting", "cooking"): "forward",
-    ("cooking", "delivered"): "forward",
-    ("cooking", "waiting"): "undo",
-    ("delivered", "cooking"): "undo",
+    # 飲食（PC2厨房）：準備中 → 受渡済
+    "food": {
+        ("waiting", "delivered"): "forward",
+        ("delivered", "waiting"): "undo",
+    },
+    # 物販（PC4）：準備中 → 受渡可能 → 受渡済。PC5に準備中・受渡可能を表示する
+    "goods": {
+        ("waiting", "ready"): "forward",
+        ("ready", "delivered"): "forward",
+        ("ready", "waiting"): "undo",
+        ("delivered", "ready"): "undo",
+    },
+}
+
+STATUS_UPDATES = {
+    ("waiting", "delivered"): "status = 'delivered', delivered_at = :now",
+    ("delivered", "waiting"): "status = 'waiting', delivered_at = NULL",
+    ("waiting", "ready"): "status = 'ready', ready_at = :now",
+    ("ready", "delivered"): "status = 'delivered', delivered_at = :now",
+    ("ready", "waiting"): "status = 'waiting', ready_at = NULL",
+    ("delivered", "ready"): "status = 'ready', delivered_at = NULL",
 }
 
 
@@ -59,6 +82,8 @@ def product_dict(row: sqlite3.Row) -> dict:
         "sold_out": bool(row["sold_out"]),
         "deleted": row["deleted_at"] is not None,
         "stock": row["stock"],
+        "category": row["category"],
+        "needs_prep": bool(row["needs_prep"]),
     }
 
 
@@ -77,7 +102,13 @@ def get_product(conn: sqlite3.Connection, product_id: int) -> dict:
 
 
 def add_product(
-    conn: sqlite3.Connection, name: str, price: int, stock: int | None, term_label: str
+    conn: sqlite3.Connection,
+    name: str,
+    price: int,
+    stock: int | None,
+    term_label: str,
+    category: str = "food",
+    needs_prep: bool = False,
 ) -> dict:
     with Tx(conn):
         no = int(get_setting(conn, "next_product_no", "1"))
@@ -91,9 +122,10 @@ def add_product(
         ).fetchone()[0]
         sold_out = 1 if stock == 0 else 0
         cur = conn.execute(
-            "INSERT INTO products (code, name, price, sort_order, sold_out, stock) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (code, name, price, sort_order, sold_out, stock),
+            "INSERT INTO products "
+            "(code, name, price, sort_order, sold_out, stock, category, needs_prep) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (code, name, price, sort_order, sold_out, stock, category, int(needs_prep)),
         )
         product = product_dict(
             conn.execute("SELECT * FROM products WHERE id = ?", (cur.lastrowid,)).fetchone()
@@ -114,6 +146,10 @@ def update_product(conn: sqlite3.Connection, product_id: int, patch, term_label:
             fields["sort_order"] = patch.sort_order
         if patch.sold_out is not None:
             fields["sold_out"] = int(patch.sold_out)
+        if patch.category is not None:
+            fields["category"] = patch.category
+        if patch.needs_prep is not None:
+            fields["needs_prep"] = int(patch.needs_prep)
         if patch.clear_stock:
             fields["stock"] = None
         elif patch.stock is not None:
@@ -203,7 +239,8 @@ def _orders_with_items(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> lis
         d = dict(r)
         d["is_test"] = bool(d["is_test"])
         d["tickets"] = tickets(d["total"])
-        d["status_label"] = STATUS_LABEL[d["status"]]
+        labels = GOODS_STATUS_LABEL if d["category"] == "goods" else STATUS_LABEL
+        d["status_label"] = labels[d["status"]]
         d["paid_ts"] = _epoch_ms(d["paid_at"])
         d["items"] = items[r["id"]]
         if d["delivered_at"]:
@@ -225,11 +262,14 @@ def get_order(conn: sqlite3.Connection, order_id: int) -> dict:
     return _orders_with_items(conn, [row])[0]
 
 
-def _next_call_no(conn: sqlite3.Connection, business_date: str, is_test: int) -> int:
+def _next_call_no(
+    conn: sqlite3.Connection, business_date: str, is_test: int, category: str = "food"
+) -> int:
+    """飲食の呼出番号と物販の受付番号は別々に振る（物販で飲食の番号が飛ばないように）。"""
     start = int(get_setting(conn, "call_no_start", "1") or 1)
     row = conn.execute(
-        "SELECT MAX(call_no) FROM orders WHERE business_date = ? AND is_test = ?",
-        (business_date, is_test),
+        "SELECT MAX(call_no) FROM orders WHERE business_date = ? AND is_test = ? AND category = ?",
+        (business_date, is_test, category),
     ).fetchone()
     return start if row[0] is None else max(row[0] + 1, start)
 
@@ -246,11 +286,15 @@ def create_order(
     paid_at: str | None = None,
     status: str = "waiting",
     is_test: bool | None = None,
+    category: str | None = None,
 ) -> tuple[dict, bool, list[dict]]:
     """会計を1トランザクションで保存する。
 
     戻り値は (注文, 新規作成したか, 在庫・売切が変わった商品)。
     同じ client_uuid の再送信には、既存の注文をそのまま返す（R-25）。
+    category を指定すると、その区分の商品だけを受け付ける（PC1は飲食、PC4は物販）。
+    飲食と物販は1つの注文に混ぜられない。物販の注文は、準備が要る商品（needs_prep）を
+    含めば status のまま（POSからは準備中）、含まなければ会計時点で受渡済になる。
     """
     if client_uuid:
         row = conn.execute("SELECT id FROM orders WHERE client_uuid = ?", (client_uuid,)).fetchone()
@@ -269,6 +313,15 @@ def create_order(
             row = conn.execute("SELECT * FROM products WHERE id = ?", (pid,)).fetchone()
             if row is None or row["deleted_at"] is not None:
                 raise ServiceError(409, "削除された商品が含まれています", product_id=pid)
+            if category is None:
+                category = row["category"]
+            if row["category"] != category:
+                raise ServiceError(
+                    409,
+                    f"「{row['name']}」は{CATEGORY_LABEL[row['category']]}の商品です"
+                    "（飲食はPC1受付、物販はPC4物販で会計してください）",
+                    product_id=pid,
+                )
             if source == "pos" and row["sold_out"]:
                 raise ServiceError(409, f"「{row['name']}」は売切です", product_id=pid)
             if row["stock"] is not None:
@@ -285,17 +338,26 @@ def create_order(
                 touched.append(pid)
             lines.append((row, qty))
 
+        # 価格がマイナスの商品は割引券。割引券だけの会計と、合計がマイナスの会計は受けない
+        if not any(row["price"] > 0 for row, _ in lines):
+            raise ServiceError(409, "割引券だけでは会計できません。商品を入れてください")
         total = sum(row["price"] * qty for row, qty in lines)
+        if total < 0:
+            raise ServiceError(
+                409, "割引が合計金額を超えています（おつりは出せません）。割引券を減らしてください"
+            )
         if is_test is None:
             is_test = get_setting(conn, "test_mode") == "1"
         is_test = int(is_test)
         business_date = business_date or today_str()
+        if category == "goods" and not any(row["needs_prep"] for row, _ in lines):
+            status = "delivered"  # 準備が要らないので、その場で渡す
         if call_no is None:
-            call_no = _next_call_no(conn, business_date, is_test)
+            call_no = _next_call_no(conn, business_date, is_test, category)
         paid_at = paid_at or now_str()
         cur = conn.execute(
             "INSERT INTO orders (client_uuid, business_date, call_no, total, status, source, "
-            "paid_at, delivered_at, is_test) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "paid_at, delivered_at, is_test, category) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 client_uuid,
                 business_date,
@@ -306,6 +368,7 @@ def create_order(
                 paid_at,
                 paid_at if status == "delivered" else None,
                 is_test,
+                category,
             ),
         )
         order_id = cur.lastrowid
@@ -334,36 +397,51 @@ def _order_summary(order: dict) -> dict:
         "total": order["total"],
         "status": order["status"],
         "is_test": order["is_test"],
+        "category": order["category"],
         "items": [f"{i['name']}×{i['qty']}" for i in order["items"]],
     }
 
 
 def change_status(
-    conn: sqlite3.Connection, order_id: int, current: str, to: str, term_label: str, tid: str
+    conn: sqlite3.Connection,
+    order_id: int,
+    current: str,
+    to: str,
+    term_label: str,
+    tid: str,
+    category: str = "food",
 ) -> dict:
-    """状態変更。今の状態が送信側の認識と同じときだけ反映する（第9章）。"""
-    kind = TRANSITIONS.get((current, to))
+    """状態変更。今の状態が送信側の認識と同じときだけ反映する（第9章）。
+
+    category は操作する端末の区分（PC2厨房は food、PC4物販は goods）。
+    """
+    labels = GOODS_STATUS_LABEL if category == "goods" else STATUS_LABEL
+    kind = TRANSITIONS[category].get((current, to))
     if kind is None:
-        raise ServiceError(400, f"{STATUS_LABEL[current]}から{STATUS_LABEL[to]}には変更できません")
+        raise ServiceError(400, f"{labels[current]}から{labels[to]}には変更できません")
     now = now_str()
     with Tx(conn):
-        updates = {
-            ("waiting", "cooking"): "status = 'cooking', started_at = :now",
-            ("cooking", "delivered"): "status = 'delivered', delivered_at = :now",
-            ("cooking", "waiting"): "status = 'waiting', started_at = NULL",
-            ("delivered", "cooking"): "status = 'cooking', delivered_at = NULL",
-        }[(current, to)]
+        order = get_order(conn, order_id)  # 404 ならここで送出
+        if order["category"] != category:
+            raise ServiceError(
+                403, f"{CATEGORY_LABEL[order['category']]}の注文はこの端末では変更できません"
+            )
+        # 準備の工程を通らなかった物販の注文（その場で渡したもの）は受渡可能に戻せない
+        extra = " AND ready_at IS NOT NULL" if (current, to) == ("delivered", "ready") else ""
         cur = conn.execute(
-            f"UPDATE orders SET {updates} WHERE id = :id AND status = :current",
+            f"UPDATE orders SET {STATUS_UPDATES[(current, to)]} "
+            f"WHERE id = :id AND status = :current{extra}",
             {"now": now, "id": order_id, "current": current},
         )
         if cur.rowcount == 0:
-            order = get_order(conn, order_id)  # 404 ならここで送出
-            raise ServiceError(
-                409,
-                f"呼出番号{order['call_no']}はすでに「{order['status_label']}」です",
-                order=order,
+            order = get_order(conn, order_id)
+            no_label = "受付番号" if category == "goods" else "呼出番号"
+            msg = (
+                f"{no_label}{order['call_no']}は準備の工程がない注文です"
+                if order["status"] == current
+                else f"{no_label}{order['call_no']}はすでに「{order['status_label']}」です"
             )
+            raise ServiceError(409, msg, order=order)
         order = get_order(conn, order_id)
         log_event(
             conn,
@@ -377,22 +455,41 @@ def change_status(
 
 
 def cancel_order(
-    conn: sqlite3.Connection, order_id: int, current: str | None, term_label: str, tid: str
+    conn: sqlite3.Connection,
+    order_id: int,
+    current: str | None,
+    term_label: str,
+    tid: str,
+    category: str | None = None,
 ) -> tuple[dict, list[dict]]:
+    """取消。飲食は受渡前だけ、物販は準備中・受渡可能・受渡済（＝返品）を取り消せる。
+
+    category を指定すると、その区分の注文だけを取り消せる。
+    """
     touched: list[int] = []
     with Tx(conn):
         order = get_order(conn, order_id)
-        if order["status"] not in ("waiting", "cooking") or (
+        goods = order["category"] == "goods"
+        no_label = "受付番号" if goods else "呼出番号"
+        if category is not None and order["category"] != category:
+            raise ServiceError(
+                403, f"{CATEGORY_LABEL[order['category']]}の注文はこの端末では取消できません"
+            )
+        cancellable = ("waiting", "ready", "delivered") if goods else ("waiting",)
+        if order["status"] not in cancellable or (
             current is not None and current != order["status"]
         ):
             raise ServiceError(
                 409,
-                f"呼出番号{order['call_no']}は「{order['status_label']}」のため取消できません",
+                f"{no_label}{order['call_no']}は「{order['status_label']}」のため取消できません",
                 order=order,
             )
+        now = now_str()
+        # 物販には厨房の「確認」がないので、取消と同時に確認済みにする
         conn.execute(
-            "UPDATE orders SET status = 'cancelled', cancelled_at = ? WHERE id = ? AND status = ?",
-            (now_str(), order_id, order["status"]),
+            "UPDATE orders SET status = 'cancelled', cancelled_at = ?, cancel_ack_at = ? "
+            "WHERE id = ? AND status = ?",
+            (now, now if goods else None, order_id, order["status"]),
         )
         # 在庫上限を使っている商品は数を戻す
         for it in order["items"]:
@@ -420,28 +517,45 @@ def ack_cancel(conn: sqlite3.Connection, order_id: int, term_label: str, tid: st
     return order
 
 
-def open_orders(conn: sqlite3.Connection) -> list[dict]:
-    """受渡前の注文と、厨房がまだ確認していない取消注文（到着順）。"""
-    rows = conn.execute(
-        "SELECT * FROM orders WHERE status IN ('waiting', 'cooking') "
-        "OR (status = 'cancelled' AND cancel_ack_at IS NULL) ORDER BY id"
-    ).fetchall()
+def open_orders(conn: sqlite3.Connection, category: str = "food") -> list[dict]:
+    """受渡前の注文（到着順）。
+
+    飲食は厨房に出す準備中と未確認の取消。物販はPC4・PC5に出す準備中・受渡可能。
+    """
+    if category == "goods":
+        where = "category = 'goods' AND status IN ('waiting', 'ready')"
+    else:
+        where = (
+            "category = 'food' AND (status = 'waiting' "
+            "OR (status = 'cancelled' AND cancel_ack_at IS NULL))"
+        )
+    rows = conn.execute(f"SELECT * FROM orders WHERE {where} ORDER BY id").fetchall()
     return _orders_with_items(conn, rows)
 
 
-def recent_delivered(conn: sqlite3.Connection, limit: int = 10) -> list[dict]:
+def recent_delivered(
+    conn: sqlite3.Connection, limit: int = 10, category: str = "food"
+) -> list[dict]:
+    """最近受け渡した注文（押し間違いの戻し用）。物販は準備の工程を通ったものだけ。"""
+    where = "category = 'food'"
+    if category == "goods":
+        where = "category = 'goods' AND ready_at IS NOT NULL"
     rows = conn.execute(
-        "SELECT * FROM orders WHERE status = 'delivered' ORDER BY delivered_at DESC, id DESC "
-        "LIMIT ?",
+        f"SELECT * FROM orders WHERE status = 'delivered' AND {where} "
+        "ORDER BY delivered_at DESC, id DESC LIMIT ?",
         (limit,),
     ).fetchall()
     return _orders_with_items(conn, rows)
 
 
-def orders_of_day(conn: sqlite3.Connection, date: str, limit: int = 200) -> list[dict]:
-    rows = conn.execute(
-        "SELECT * FROM orders WHERE business_date = ? ORDER BY id DESC LIMIT ?", (date, limit)
-    ).fetchall()
+def orders_of_day(
+    conn: sqlite3.Connection, date: str, limit: int = 200, category: str | None = None
+) -> list[dict]:
+    sql, args = "SELECT * FROM orders WHERE business_date = ?", [date]
+    if category:
+        sql += " AND category = ?"
+        args.append(category)
+    rows = conn.execute(sql + " ORDER BY id DESC LIMIT ?", (*args, limit)).fetchall()
     return _orders_with_items(conn, rows)
 
 
@@ -452,11 +566,15 @@ def search_orders(
     q: str | None = None,
     test: str = "all",
     limit: int = 500,
+    category: str | None = None,
 ) -> list[dict]:
     where, args = [], []
     if date:
         where.append("o.business_date = ?")
         args.append(date)
+    if category:
+        where.append("o.category = ?")
+        args.append(category)
     if status:
         where.append("o.status = ?")
         args.append(status)
@@ -537,7 +655,7 @@ def delete_order(conn: sqlite3.Connection, order_id: int, term_label: str) -> di
     with Tx(conn):
         order = get_order(conn, order_id)
         if order["status"] not in ("delivered", "cancelled"):
-            raise ServiceError(409, "未着手・調理中の注文は削除できません", order=order)
+            raise ServiceError(409, "受渡前の注文は削除できません", order=order)
         conn.execute("DELETE FROM orders WHERE id = ?", (order_id,))
         log_event(
             conn, term_label, "order_deleted", order_id, {"id": order_id, **_order_summary(order)}
@@ -548,13 +666,20 @@ def delete_order(conn: sqlite3.Connection, order_id: int, term_label: str) -> di
 # ================================================================ summary (A-08)
 
 
-def summary(conn: sqlite3.Connection, date: str | None) -> dict:
-    cond, args = "o.status != 'cancelled' AND o.is_test = 0", []
+def summary(conn: sqlite3.Connection, date: str | None, category: str | None = None) -> dict:
+    """売上集計。category（food / goods）を指定するとその区分だけを集計する。"""
+    base, base_args = "1 = 1", []
+    if category:
+        base += " AND category = ?"
+        base_args.append(category)
+    date_cond, date_args = base, list(base_args)
     if date:
-        cond += " AND o.business_date = ?"
-        args.append(date)
+        date_cond += " AND business_date = ?"
+        date_args.append(date)
+    cond = f"status != 'cancelled' AND is_test = 0 AND {date_cond}"
+    args = date_args
     tot = conn.execute(
-        f"SELECT COUNT(*) AS n, COALESCE(SUM(total), 0) AS amount FROM orders o WHERE {cond}",
+        f"SELECT COUNT(*) AS n, COALESCE(SUM(total), 0) AS amount FROM orders WHERE {cond}",
         args,
     ).fetchone()
     products = [
@@ -568,7 +693,7 @@ def summary(conn: sqlite3.Connection, date: str | None) -> dict:
         for r in conn.execute(
             f"SELECT i.product_id, MAX(i.name) AS name, SUM(i.qty) AS qty, "
             f"SUM(i.qty * i.unit_price) AS amount FROM order_items i "
-            f"JOIN orders o ON o.id = i.order_id WHERE {cond} "
+            f"JOIN (SELECT id FROM orders WHERE {cond}) o ON o.id = i.order_id "
             f"GROUP BY i.product_id ORDER BY amount DESC",
             args,
         )
@@ -576,25 +701,25 @@ def summary(conn: sqlite3.Connection, date: str | None) -> dict:
     hourly = [
         {"hour": int(r["h"]), "orders": r["n"], "amount": r["amount"]}
         for r in conn.execute(
-            f"SELECT substr(o.paid_at, 12, 2) AS h, COUNT(*) AS n, SUM(o.total) AS amount "
-            f"FROM orders o WHERE {cond} GROUP BY h ORDER BY h",
+            f"SELECT substr(paid_at, 12, 2) AS h, COUNT(*) AS n, SUM(total) AS amount "
+            f"FROM orders WHERE {cond} GROUP BY h ORDER BY h",
             args,
         )
     ]
+    # 待ち時間は厨房を通る飲食の注文だけで見る（物販は会計＝受渡なので0秒になる）
     wait = conn.execute(
         f"SELECT AVG((julianday(delivered_at) - julianday(paid_at)) * 86400) AS w, "
-        f"COUNT(*) AS n FROM orders o WHERE {cond} AND o.status = 'delivered' "
-        f"AND o.source = 'pos'",
+        f"COUNT(*) AS n FROM orders WHERE {cond} AND status = 'delivered' "
+        f"AND source = 'pos' AND category = 'food'",
         args,
     ).fetchone()
-    date_cond, date_args = ("AND business_date = ?", [date]) if date else ("", [])
     cancelled = conn.execute(
         f"SELECT COUNT(*), COALESCE(SUM(total), 0) FROM orders "
-        f"WHERE status = 'cancelled' AND is_test = 0 {date_cond}",
+        f"WHERE status = 'cancelled' AND is_test = 0 AND {date_cond}",
         date_args,
     ).fetchone()
     test = conn.execute(
-        f"SELECT COUNT(*) FROM orders WHERE is_test = 1 {date_cond}", date_args
+        f"SELECT COUNT(*) FROM orders WHERE is_test = 1 AND {date_cond}", date_args
     ).fetchone()
     days = [
         {
@@ -604,12 +729,35 @@ def summary(conn: sqlite3.Connection, date: str | None) -> dict:
             "tickets": tickets(r["amount"]),
         }
         for r in conn.execute(
-            "SELECT business_date AS d, COUNT(*) AS n, SUM(total) AS amount FROM orders "
-            "WHERE status != 'cancelled' AND is_test = 0 GROUP BY d ORDER BY d"
+            f"SELECT business_date AS d, COUNT(*) AS n, SUM(total) AS amount FROM orders "
+            f"WHERE status != 'cancelled' AND is_test = 0 AND {base} GROUP BY d ORDER BY d",
+            base_args,
         )
+    ]
+    # 区分別（飲食・物販）。レジ締めで金券を別々に数えるとき用
+    by_cat = {
+        r["category"]: r
+        for r in conn.execute(
+            "SELECT category, COUNT(*) AS n, COALESCE(SUM(total), 0) AS amount FROM orders "
+            "WHERE status != 'cancelled' AND is_test = 0"
+            + (" AND business_date = ?" if date else "")
+            + " GROUP BY category",
+            [date] if date else [],
+        )
+    }
+    categories = [
+        {
+            "category": c,
+            "label": label,
+            "orders": by_cat[c]["n"] if c in by_cat else 0,
+            "amount": by_cat[c]["amount"] if c in by_cat else 0,
+            "tickets": tickets(by_cat[c]["amount"]) if c in by_cat else 0,
+        }
+        for c, label in CATEGORY_LABEL.items()
     ]
     return {
         "business_date": date,
+        "category": category,
         "orders": tot["n"],
         "amount": tot["amount"],
         "tickets": tickets(tot["amount"]),
@@ -620,6 +768,7 @@ def summary(conn: sqlite3.Connection, date: str | None) -> dict:
         "cancelled_count": cancelled[0],
         "cancelled_amount": cancelled[1],
         "test_count": test[0],
+        "categories": categories,
         "days": days,
         "dates": [
             r[0] for r in conn.execute("SELECT DISTINCT business_date FROM orders ORDER BY 1 DESC")
@@ -631,11 +780,18 @@ def summary(conn: sqlite3.Connection, date: str | None) -> dict:
 
 
 def record_closing(
-    conn: sqlite3.Connection, date: str, counted: int, note: str, term_label: str
+    conn: sqlite3.Connection,
+    date: str,
+    counted: int,
+    note: str,
+    term_label: str,
+    category: str | None = None,
 ) -> dict:
-    s = summary(conn, date)
+    """レジ締め。category を指定すると、その区分（飲食・物販）の金券だけで照合する。"""
+    s = summary(conn, date, category)
     result = {
         "business_date": date,
+        "category": category,
         "expected_tickets": s["tickets"],
         "expected_amount": s["amount"],
         "counted_tickets": counted,
@@ -643,7 +799,7 @@ def record_closing(
         "diff_amount": (counted - s["tickets"]) * TICKET,
         "open_orders": conn.execute(
             "SELECT COUNT(*) FROM orders WHERE business_date = ? "
-            "AND status IN ('waiting', 'cooking') AND is_test = 0",
+            "AND status IN ('waiting', 'cooking', 'ready') AND is_test = 0",
             (date,),
         ).fetchone()[0],
         "note": note,
@@ -718,17 +874,19 @@ def export_csv(conn: sqlite3.Connection, kind: str) -> str:
             "source",
             "paid_at",
             "started_at",
+            "ready_at",
             "delivered_at",
             "cancelled_at",
             "is_test",
             "client_uuid",
+            "category",
         ]
         rows = conn.execute(f"SELECT {', '.join(cols)} FROM orders ORDER BY id").fetchall()
         return _csv(cols + ["tickets"], [(*r, tickets(r["total"])) for r in rows])
     if kind == "items":
         rows = conn.execute(
             "SELECT i.id, i.order_id, o.business_date, o.call_no, o.status, o.is_test, "
-            "i.product_id, i.name, i.unit_price, i.qty, i.unit_price * i.qty "
+            "o.category, i.product_id, i.name, i.unit_price, i.qty, i.unit_price * i.qty "
             "FROM order_items i JOIN orders o ON o.id = i.order_id ORDER BY i.id"
         ).fetchall()
         return _csv(
@@ -739,6 +897,7 @@ def export_csv(conn: sqlite3.Connection, kind: str) -> str:
                 "call_no",
                 "status",
                 "is_test",
+                "category",
                 "product_id",
                 "name",
                 "unit_price",
@@ -753,3 +912,90 @@ def export_csv(conn: sqlite3.Connection, kind: str) -> str:
         ).fetchall()
         return _csv(["id", "at", "terminal", "terminal_id", "kind", "target_id", "content"], rows)
     raise ServiceError(404, "不明なCSVの種類です")
+
+
+# ---------------------------------------------------------------- 売上グラフ
+
+BUCKET_MINUTES = 30
+MAX_SERIES_BUCKETS = 14 * 24 * 2  # 14日分（30分ごと）まで
+
+
+def _floor_bucket(t: datetime) -> datetime:
+    return t.replace(minute=t.minute - t.minute % BUCKET_MINUTES, second=0, microsecond=0)
+
+
+def sales_series(
+    conn: sqlite3.Connection,
+    since: str,
+    until: str,
+    category: str | None = None,
+    trim: bool = False,
+) -> dict:
+    """since 以上 until 未満の会計時刻の売上を30分ごとに集計する（売上グラフ用）。
+
+    取消・テスト注文は除く（売上集計と同じ）。cumulative は期間の始めからの累計。
+    trim=True なら日ごとに、最初の売上の前と最後の売上の後を切り落とす（営業日をまたいでも夜中を出さない）。
+    """
+    try:
+        start = datetime.fromisoformat(since)
+        end = datetime.fromisoformat(until)
+    except ValueError as e:
+        raise ServiceError(400, "期間の日時の形式が正しくありません") from e
+    if start >= end:
+        raise ServiceError(400, "期間の「から」は「まで」より前にしてください")
+    start = _floor_bucket(start)
+    if (end - start) > timedelta(minutes=BUCKET_MINUTES * MAX_SERIES_BUCKETS):
+        raise ServiceError(400, "期間は14日以内にしてください")
+
+    cond = "status != 'cancelled' AND is_test = 0 AND paid_at >= ? AND paid_at < ?"
+    args: list = [start.isoformat(timespec="seconds"), end.isoformat(timespec="seconds")]
+    if category:
+        cond += " AND category = ?"
+        args.append(category)
+    step = timedelta(minutes=BUCKET_MINUTES)
+    sums: dict[datetime, list[int]] = {}
+    for r in conn.execute(f"SELECT paid_at, total FROM orders WHERE {cond}", args):
+        b = _floor_bucket(datetime.fromisoformat(r["paid_at"]))
+        acc = sums.setdefault(b, [0, 0])
+        acc[0] += 1
+        acc[1] += r["total"]
+
+    # 出す30分の並び。trim なら日ごとに、最初と最後の売上の間だけにする（夜中は出さない）
+    if not trim:
+        spans = [(start, end)]
+    else:
+        by_day: dict = {}
+        for b in sums:
+            lo, hi = by_day.get(b.date(), (b, b))
+            by_day[b.date()] = (min(lo, b), max(hi, b))
+        spans = [(lo, hi + step) for _, (lo, hi) in sorted(by_day.items())]
+
+    buckets = []
+    cumulative = 0
+    for first, last in spans:
+        t = first
+        while t < last:
+            n, amount = sums.get(t, (0, 0))
+            cumulative += amount
+            e = min(t + step, end)
+            buckets.append(
+                {
+                    "start": t.isoformat(timespec="minutes"),
+                    "end": e.isoformat(timespec="minutes"),
+                    "orders": n,
+                    "amount": amount,
+                    "tickets": tickets(amount),
+                    "cumulative": cumulative,
+                }
+            )
+            t += step
+    total_orders = sum(b["orders"] for b in buckets)
+    return {
+        "since": start.isoformat(timespec="minutes"),
+        "until": end.isoformat(timespec="minutes"),
+        "bucket_minutes": BUCKET_MINUTES,
+        "buckets": buckets,
+        "orders": total_orders,
+        "amount": cumulative,
+        "tickets": tickets(cumulative),
+    }

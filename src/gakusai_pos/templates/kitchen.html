@@ -9,18 +9,10 @@
   <button type="button" id="btn-recent">受渡済</button>
 </header>
 <div class="kd-summary" id="kd-summary"></div>
-<div class="kd-tabs" id="kd-tabs">
-  <button type="button" data-tab="waiting" class="active">未着手 <span class="num" id="tab-waiting">0</span></button>
-  <button type="button" data-tab="cooking">調理中 <span class="num" id="tab-cooking">0</span></button>
-</div>
 <main class="kd-cols">
-  <section class="kd-col show" id="col-waiting">
-    <h2>未着手 <span class="badge count num" id="count-waiting">0</span></h2>
+  <section class="kd-col">
+    <h2>準備中 <span class="badge count num" id="count-waiting">0</span></h2>
     <div class="kd-list" id="list-waiting"></div>
-  </section>
-  <section class="kd-col" id="col-cooking">
-    <h2>調理中 <span class="badge count num" id="count-cooking">0</span></h2>
-    <div class="kd-list" id="list-cooking"></div>
   </section>
 </main>
 
@@ -34,7 +26,7 @@
 <div class="overlay hidden" id="ov-recent">
   <div class="panel">
     <div class="panel-head"><h2>最近受け渡した注文</h2><button type="button" data-close>閉じる</button></div>
-    <p class="muted">押し間違えたときは「調理中に戻す」を押してください。</p>
+    <p class="muted">押し間違えたときは「準備中に戻す」を押してください。</p>
     <ul class="history-list" id="recent-list"></ul>
   </div>
 </div>

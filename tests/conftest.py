@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 from gakusai_pos.app import create_app
 
 BASE = "https://testserver"
-REMOTE = ("192.0.2.10", 50000)  # PC1・PC2（Wi-Fi上の別の端末）
+REMOTE = ("192.0.2.10", 50000)  # PC1・PC2・PC4・PC5（Wi-Fi上の別の端末）
 LOCAL = ("127.0.0.1", 50000)  # PC3自身
 
 
@@ -43,6 +43,18 @@ def kitchen(app):
 
 
 @pytest.fixture
+def goods(app):
+    with _terminal(app, "goods") as c:
+        yield c
+
+
+@pytest.fixture
+def pickup(app):
+    with _terminal(app, "pickup") as c:
+        yield c
+
+
+@pytest.fixture
 def stranger(app):
     with TestClient(app, base_url=BASE, client=REMOTE) as c:
         yield c
@@ -55,6 +67,24 @@ def menu(admin):
     out = []
     for name, price in items:
         r = admin.post("/admin/api/products", json={"name": name, "price": price})
+        assert r.status_code == 201, r.text
+        out.append(r.json())
+    return out
+
+
+@pytest.fixture
+def goods_menu(admin):
+    """物販：Tシャツ1500円・ステッカー100円・3Dプリント500円（その場で製作＝待ち時間あり）"""
+    out = []
+    for name, price, prep in [
+        ("Tシャツ", 1500, False),
+        ("ステッカー", 100, False),
+        ("3Dプリント", 500, True),
+    ]:
+        r = admin.post(
+            "/admin/api/products",
+            json={"name": name, "price": price, "category": "goods", "needs_prep": prep},
+        )
         assert r.status_code == 201, r.text
         out.append(r.json())
     return out

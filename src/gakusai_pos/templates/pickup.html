@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}受渡表示{% endblock %}
+{% block body_attrs %}data-role="pickup" class="pk-body"{% endblock %}
+{% block body %}
+<header class="topbar">
+  <span class="title">物販の受け渡し <span id="shop-name">{{ settings.shop_name }}</span></span>
+  <span id="test-badge" class="badge badge-test{% if not settings.test_mode %} hidden{% endif %}">テストモード</span>
+</header>
+<main class="pk-cols">
+  <section class="pk-col" aria-labelledby="pk-h-waiting">
+    <h2 id="pk-h-waiting">準備中</h2>
+    <div class="pk-list" id="list-waiting"></div>
+  </section>
+  <section class="pk-col ready" aria-labelledby="pk-h-ready">
+    <h2 id="pk-h-ready">受け渡し可能</h2>
+    <div class="pk-list" id="list-ready"></div>
+  </section>
+</main>
+<p class="pk-note">「受け渡し可能」に番号が出たら、番号札を物販の受付へお持ちください</p>
+{% endblock %}
+{% block scripts %}
+<script src="/static/pickup.js?v={{ v }}"></script>
+{% endblock %}

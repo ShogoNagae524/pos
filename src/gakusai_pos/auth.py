@@ -13,7 +13,10 @@ from fastapi import HTTPException, Request, WebSocket
 COOKIE_NAME = "gakusai_pos_session"
 COOKIE_MAX_AGE = 60 * 60 * 24 * 7
 
-ROLES = {"reception": "PC1受付", "kitchen": "PC2厨房"}
+ROLES = {"reception": "PC1受付", "kitchen": "PC2厨房", "goods": "PC4物販", "pickup": "PC5受渡表示"}
+
+# 端末と、扱う注文の区分（PC5は物販の準備中・受渡可能を表示するだけ）
+ROLE_CATEGORY = {"reception": "food", "kitchen": "food", "goods": "goods", "pickup": "goods"}
 ADMIN_LABEL = "PC3管理"
 
 LOOPBACK = {"127.0.0.1", "::1", "localhost"}
@@ -47,7 +50,7 @@ def verify_passcode(passcode: str, stored: str | None) -> bool:
 
 @dataclass(frozen=True)
 class Terminal:
-    role: str  # reception / kitchen / admin
+    role: str  # reception / kitchen / goods / pickup / admin
     tid: str  # 端末ごとのランダムID（ログ・接続状況用）
 
     @property

@@ -1,14 +1,20 @@
-// 受付端末（PC1）：商品入力（ボタン・QR）、会計、履歴・取消
+// 受付端末（PC1 飲食）と物販端末（PC4）：商品入力（ボタン・QR）、会計、履歴・取消
+// 物販は調理の工程がないので、会計した時点で受渡済になる（厨房には出ない）
 "use strict";
 
 (() => {
   const $ = (id) => document.getElementById(id);
-  const ROLE = "reception";
+  const ROLE = document.body.dataset.role === "goods" ? "goods" : "reception";
+  const GOODS = ROLE === "goods";
+  const CATEGORY = GOODS ? "goods" : "food"; // この端末で扱う商品の区分
+  const NO_LABEL = GOODS ? "受付番号" : "呼出番号";
   const api = (path, opts = {}) => POS.api(path, { ...opts, role: ROLE });
 
-  const KEY_CART = "pos.reception.cart";
-  const KEY_PENDING = "pos.reception.pending";
-  const KEY_CAM = "pos.reception.camera";
+  const KEY_CART = `pos.${ROLE}.cart`;
+  const KEY_PENDING = `pos.${ROLE}.pending`;
+  const KEY_CAM = `pos.${ROLE}.camera`;
+  const KEY_PRE = `pos.${ROLE}.preorder`;
+  const KEY_PRE_USED = `pos.${ROLE}.preorderUsed`;
 
   let products = new Map(); // id -> product
   let byCode = new Map(); // code -> product
@@ -17,10 +23,15 @@
   let nextQty = 1; // R-04 数字を押してから商品を追加
   let pending = POS.store.get(KEY_PENDING, null); // 送信中の会計 {client_uuid, items, total}
   let historyOpen = false;
+  // カートに読み込んだ事前注文 {id, issues:[], priceChanged}。カートが空になったら消す
+  let preorder = POS.store.get(KEY_PRE, null);
+  if (!cart.length) preorder = null;
+  // 会計済みの事前注文ID（同じQRで二重に会計しないよう、最新200件を覚えておく）
+  let usedPreorders = POS.store.get(KEY_PRE_USED, []);
 
   // ============================================================ 商品
   async function loadProducts() {
-    const list = await api("/api/products");
+    const list = (await api("/api/products")).filter((p) => p.category === CATEGORY);
     products = new Map(list.map((p) => [p.id, p]));
     byCode = new Map(list.map((p) => [p.code.toUpperCase(), p]));
     renderProducts();
@@ -32,7 +43,7 @@
     const list = [...products.values()].sort((a, b) => a.sort_order - b.sort_order || a.id - b.id);
     $("no-products").classList.toggle("hidden", list.length > 0);
     grid.innerHTML = list.map((p) => `
-      <button type="button" class="product-btn${p.sold_out ? " sold-out" : ""}" data-id="${p.id}">
+      <button type="button" class="product-btn${p.sold_out ? " sold-out" : ""}${p.price < 0 ? " discount" : ""}" data-id="${p.id}">
         <span>${POS.esc(p.name)}</span>
         <span class="price num">${POS.yen(p.price)}</span>
         ${p.stock !== null && !p.sold_out ? `<span class="stock">残り${p.stock}</span>` : ""}
@@ -41,10 +52,10 @@
 
   $("product-grid").addEventListener("click", (e) => {
     const btn = e.target.closest(".product-btn");
-    if (btn) addProduct(products.get(Number(btn.dataset.id)), "button");
+    if (btn) addProduct(products.get(Number(btn.dataset.id)));
   });
 
-  function addProduct(p, via) {
+  function addProduct(p) {
     if (!p) return false;
     if (p.sold_out) {
       POS.sound.error();
@@ -58,7 +69,6 @@
     setNextQty(1);
     saveCart();
     renderCart();
-    if (via === "qr") POS.toast(`${p.name} ×${qty}`, "ok", 1200);
     return true;
   }
 
@@ -77,16 +87,33 @@
   });
 
   // ============================================================ カート
-  function saveCart() { POS.store.set(KEY_CART, cart); }
+  function saveCart() {
+    if (!cart.length) preorder = null;
+    POS.store.set(KEY_CART, cart);
+    if (preorder) POS.store.set(KEY_PRE, preorder);
+    else POS.store.del(KEY_PRE);
+  }
 
+  // 価格がマイナスの商品は割引券。count は商品の点数、coupons は割引券の枚数
   function cartTotals() {
-    let total = 0, count = 0;
+    let total = 0, count = 0, coupons = 0, items = 0;
     for (const l of cart) {
       const p = products.get(l.product_id);
       if (p) total += p.price * l.qty;
-      count += l.qty;
+      if (p && p.price < 0) coupons += l.qty;
+      else count += l.qty;
+      if (p && p.price > 0) items += l.qty;
     }
-    return { total, count };
+    return { total, count, coupons, items };
+  }
+
+  // 割引券だけ・合計がマイナスの会計はできない（サーバーでも拒否する）
+  function discountProblem() {
+    const { total, coupons, items } = cartTotals();
+    if (!coupons) return "";
+    if (!items) return "割引券だけでは会計できません。商品を入れてください";
+    if (total < 0) return "割引が合計金額を超えています（おつりは出せません）。割引券を減らしてください";
+    return "";
   }
 
   function cartProblems() {
@@ -96,7 +123,9 @@
   function renderCart() {
     const ul = $("cart-list");
     if (!cart.length) {
-      ul.innerHTML = `<li class="cart-empty">商品ボタンを押すか、QRカードをかざしてください</li>`;
+      ul.innerHTML = GOODS
+        ? `<li class="cart-empty">商品ボタンを押してください</li>`
+        : `<li class="cart-empty">商品ボタンを押すか、事前注文のQRをかざしてください</li>`;
     } else {
       ul.innerHTML = cart.map((l, i) => {
         const p = products.get(l.product_id);
@@ -114,9 +143,11 @@
         </li>`;
       }).join("");
     }
-    const { total, count } = cartTotals();
+    renderPreorderNote();
+    const { total, count, coupons } = cartTotals();
     $("total-amount").textContent = POS.yen(total);
-    $("total-detail").textContent = `${count}点・金券${POS.tickets(total)}枚`;
+    $("total-detail").textContent = discountProblem() ||
+      `${count}点・金券${POS.tickets(total)}枚${coupons ? `・割引券${coupons}枚` : ""}`;
     $("btn-checkout").disabled = cart.length === 0;
     $("btn-clear").disabled = cart.length === 0;
   }
@@ -145,6 +176,99 @@
     renderCart();
   });
 
+  function renderPreorderNote() {
+    const box = $("preorder-note");
+    if (!preorder) { box.classList.add("hidden"); return; }
+    const warn = preorder.issues.length > 0 || preorder.priceChanged;
+    let html = `<strong>事前注文 ${POS.esc(preorder.id)}</strong> を読み込みました。内容をお客様と確認してから会計してください`;
+    if (preorder.issues.length) {
+      html += `<br>入れられなかった商品：${preorder.issues.map(POS.esc).join("、")}`;
+    }
+    if (preorder.priceChanged) {
+      html += `<br>お客様のページの合計（${POS.yen(preorder.pageTotal)}）と今の価格が違います`;
+    }
+    box.innerHTML = html;
+    box.classList.toggle("warn", warn);
+    box.classList.remove("hidden");
+  }
+
+  // ============================================================ 事前注文QR
+  // お客様が事前注文ページで作ったQR。カートに入れるだけで、会計はいつもどおり店員が確定する。
+  // 中身はお客様が書き換えられるので、商品・価格・売切はすべてこの端末の最新の情報で判断する
+  function preorderError(msg) {
+    POS.sound.error();
+    flash("ng");
+    POS.toast(msg, "error", 4000);
+    $("cam-msg").textContent = msg;
+  }
+
+  function loadPreorder(raw) {
+    if (GOODS) {
+      preorderError("飲食の事前注文QRです。飲食の受付（PC1）で読み込んでください");
+      return;
+    }
+    const pre = PreorderCode.parse(raw);
+    if (!pre) {
+      preorderError("事前注文QRの形式が正しくありません。商品ボタンで入力してください");
+      return;
+    }
+    if (preorder && preorder.id === pre.id) {
+      POS.toast(`事前注文 ${pre.id} は読み込み済みです`, "warn");
+      return;
+    }
+    if (usedPreorders.includes(pre.id)) {
+      preorderError(`事前注文 ${pre.id} は会計済みです。追加の注文は商品ボタンで入力してください`);
+      return;
+    }
+    if (cart.length) {
+      preorderError("カートに商品があります。会計を済ませるか、カートを空にしてから読み込んでください");
+      return;
+    }
+    const issues = [];
+    const lines = [];
+    let pageTotalNow = 0; // ページの商品を今の価格で計算した合計
+    let allKnown = true;
+    for (const l of pre.lines) {
+      const p = byCode.get(l.code);
+      if (!p) {
+        allKnown = false;
+        issues.push(`未登録のコード ${l.code}`);
+        continue;
+      }
+      // 割引券は事前注文に入れられない（券を受け取ってから受付で入れる）
+      if (p.price < 0) { issues.push(`${p.name}（割引券は券を受け取ってから入れてください）`); continue; }
+      pageTotalNow += p.price * l.qty;
+      if (p.sold_out) { issues.push(`${p.name}（売切）`); continue; }
+      lines.push({ product_id: p.id, qty: l.qty });
+    }
+    if (!lines.length) {
+      preorderError(`事前注文の商品をカートに入れられませんでした（${issues.join("、")}）`);
+      return;
+    }
+    cart = lines;
+    preorder = {
+      id: pre.id,
+      issues,
+      pageTotal: pre.total,
+      priceChanged: allKnown && pageTotalNow !== pre.total,
+    };
+    setNextQty(1);
+    saveCart();
+    renderCart();
+    const warn = issues.length > 0 || preorder.priceChanged;
+    if (warn) POS.sound.error(); else POS.sound.ok();
+    flash(warn ? "ng" : "ok");
+    $("cam-msg").textContent = `事前注文 ${pre.id} を読み込みました`;
+    POS.toast(warn ? "事前注文を読み込みました。カートの注意を確認してください"
+      : "事前注文を読み込みました。内容を確認して会計へ", warn ? "warn" : "ok", 3000);
+  }
+
+  function markPreorderUsed(id) {
+    if (!id || usedPreorders.includes(id)) return;
+    usedPreorders = [...usedPreorders, id].slice(-200);
+    POS.store.set(KEY_PRE_USED, usedPreorders);
+  }
+
   // 縦長の画面では合計をタップしてカートを開閉
   $("cart-total").addEventListener("click", () => {
     const c = $("cart");
@@ -163,15 +287,22 @@
       POS.toast("売切・削除された商品がカートにあります。削除してください", "error", 3500);
       return;
     }
+    const discountErr = discountProblem();
+    if (discountErr) {
+      POS.sound.error();
+      POS.toast(discountErr, "error", 3500);
+      return;
+    }
     const rows = cart.map((l) => {
       const p = products.get(l.product_id);
-      return `<tr><td>${POS.esc(p.name)}</td><td class="num">×${l.qty}</td>
+      return `<tr${p.price < 0 ? ' class="discount"' : ""}><td>${POS.esc(p.name)}</td><td class="num">×${l.qty}</td>
               <td class="num">${POS.yen(p.price * l.qty)}</td></tr>`;
     }).join("");
     $("checkout-lines").innerHTML = rows;
-    const { total } = cartTotals();
+    const { total, coupons } = cartTotals();
     $("checkout-total").innerHTML =
-      `合計 ${POS.yen(total)}<span class="tickets">＝ 金券 ${POS.tickets(total)}枚</span>`;
+      `合計 ${POS.yen(total)}<span class="tickets">＝ 金券 ${POS.tickets(total)}枚</span>` +
+      (coupons ? `<span class="coupons">＋ 割引券 ${coupons}枚を受け取る</span>` : "");
     setSaveStatus("");
     $("btn-paid").disabled = false;
     $("btn-back").disabled = false;
@@ -195,6 +326,7 @@
       client_uuid: POS.uuid(),
       items: cart.map((l) => ({ product_id: l.product_id, qty: l.qty })),
       total,
+      preorder_id: preorder ? preorder.id : null,
     };
     POS.store.set(KEY_PENDING, pending);
     submitPending();
@@ -219,6 +351,7 @@
         method: "POST",
         body: { client_uuid: pending.client_uuid, items: pending.items },
       });
+      markPreorderUsed(pending.preorder_id);
       pending = null;
       POS.store.del(KEY_PENDING);
       cart = [];
@@ -230,7 +363,9 @@
     } catch (e) {
       if (e.network || e.status === 0 || e.status >= 500) {
         // 通信が切れた：同じIDで自動再送信（サーバーは1件として扱う）
-        setSaveStatus("保存に失敗しました。自動で再送信しています…（番号が出るまで番号札を渡さないでください）", "error");
+        setSaveStatus(GOODS
+          ? "保存に失敗しました。自動で再送信しています…（番号が出るまで商品を渡さないでください）"
+          : "保存に失敗しました。自動で再送信しています…（番号が出るまで番号札を渡さないでください）", "error");
         retryTimer = setTimeout(submitPending, 2000);
       } else {
         // 売切などで受け付けられなかった：カートに戻して直してもらう
@@ -246,11 +381,17 @@
   }
 
   function showCallNo(order, fresh) {
-    $("callno-label").textContent = fresh ? "呼出番号" : "呼出番号（再表示）";
+    $("callno-label").textContent = fresh ? NO_LABEL : `${NO_LABEL}（再表示）`;
     $("callno-value").textContent = order.call_no;
     const items = order.items.map((i) => `${i.name}×${i.qty}`).join("、");
     $("callno-detail").textContent =
       `${items}　${POS.yen(order.total)}（金券${order.tickets}枚）${order.is_test ? "【テスト】" : ""}`;
+    if (GOODS) {
+      // 準備が要る商品を含む注文は準備中から始まり、できあがるとPC5に番号が出る
+      $("callno-hint").textContent = order.status === "waiting" || order.status === "ready"
+        ? "この番号を番号札に書いて渡してください。できあがると受渡表示（PC5）に番号が出ます（準備の要らない商品は今お渡しください）"
+        : "商品をお渡しください";
+    }
     show("ov-callno", true);
   }
 
@@ -274,11 +415,13 @@
       return;
     }
     ul.innerHTML = todayOrders.map((o) => {
-      const open = o.status === "waiting" || o.status === "cooking";
+      // 飲食は受渡前だけ、物販は受渡済（返品）を取り消せる
+      const open = GOODS ? ["waiting", "ready", "delivered"].includes(o.status)
+        : o.status === "waiting" || o.status === "cooking";
       return `<li class="history-item">
         <span class="no num">${o.call_no}</span>
         <span class="info">
-          <span><span class="badge badge-${o.status}">${POS.STATUS_LABEL[o.status]}</span>
+          <span><span class="badge badge-${o.status}">${POS.esc(o.status_label)}</span>
             ${o.is_test ? '<span class="badge badge-test">テスト</span>' : ""}
             <span class="muted num">${POS.hhmm(o.paid_at)}</span></span>
           <span>${o.items.map((i) => `${POS.esc(i.name)}×${i.qty}`).join("、")}</span>
@@ -307,11 +450,14 @@
     if (b.dataset.act === "recall") { showCallNo(o, false); return; }
     if (b.dataset.act === "cancel") {
       const items = o.items.map((i) => `${i.name}×${i.qty}`).join("、");
-      if (!confirm(`呼出番号 ${o.call_no}（${items}／${POS.yen(o.total)}）を取り消しますか？\n金券${o.tickets}枚を手でお返しください。`)) return;
+      const extra = GOODS ? "商品を返してもらい、" : "";
+      const coupons = o.items.filter((i) => i.unit_price < 0).reduce((s, i) => s + i.qty, 0);
+      const back = coupons ? `金券${o.tickets}枚と割引券${coupons}枚` : `金券${o.tickets}枚`;
+      if (!confirm(`${NO_LABEL} ${o.call_no}（${items}／${POS.yen(o.total)}）を取り消しますか？\n${extra}${back}を手でお返しください。`)) return;
       b.disabled = true;
       try {
         await api(`/api/orders/${o.id}/cancel`, { method: "POST", body: { current: o.status } });
-        POS.toast(`呼出番号 ${o.call_no} を取り消しました。金券${o.tickets}枚を返してください`, "warn", 4000);
+        POS.toast(`${NO_LABEL} ${o.call_no} を取り消しました。金券${o.tickets}枚を返してください`, "warn", 4000);
       } catch (ex) {
         POS.sound.error();
         POS.toast(ex.message, "error", 3500);
@@ -319,6 +465,79 @@
       await loadHistory().catch(() => {});
     }
   });
+
+  // ============================================================ 物販の準備・受渡（PC4のみ）
+  // 準備中 → 受け渡し可能（PC5に表示）→ 受渡完了。押し間違いは1段階戻せる
+  let prepOrders = []; // 準備中・受渡可能
+  let prepDelivered = []; // 最近受け渡した、準備の工程を通った注文
+  let prepOpen = false;
+
+  const PREP_ACTIONS = {
+    ready: { current: "waiting", to: "ready" },
+    deliver: { current: "ready", to: "delivered" },
+    back: { current: "ready", to: "waiting" },
+    undeliver: { current: "delivered", to: "ready" },
+  };
+
+  async function loadPrep() {
+    if (!GOODS) return;
+    prepOrders = await api("/api/orders?status=open");
+    if (prepOpen) prepDelivered = await api("/api/orders?status=delivered&limit=10");
+    renderPrep();
+  }
+
+  function prepItem(o, buttons) {
+    return `<li class="history-item">
+      <span class="no num">${o.call_no}</span>
+      <span class="info">
+        <span class="muted num">会計 ${POS.hhmm(o.paid_at)}${o.is_test ? ' <span class="badge badge-test">テスト</span>' : ""}</span>
+        <span>${o.items.map((i) => `${POS.esc(i.name)}×${i.qty}`).join("、")}</span>
+      </span>
+      <span class="acts">${buttons}</span>
+    </li>`;
+  }
+
+  function renderPrep() {
+    if (!GOODS) return;
+    const waiting = prepOrders.filter((o) => o.status === "waiting");
+    const ready = prepOrders.filter((o) => o.status === "ready");
+    $("prep-count").textContent = waiting.length + ready.length;
+    const empty = (t) => `<li class="muted" style="padding:12px">${t}</li>`;
+    $("prep-waiting").innerHTML = waiting.map((o) => prepItem(o,
+      `<button type="button" class="btn-primary" data-prep="ready" data-id="${o.id}">受け渡し可能にする</button>`)).join("")
+      || empty("準備中の注文はありません");
+    $("prep-ready").innerHTML = ready.map((o) => prepItem(o,
+      `<button type="button" class="btn-small" data-prep="back" data-id="${o.id}">準備中に戻す</button>
+       <button type="button" class="btn-ok" data-prep="deliver" data-id="${o.id}">受渡完了</button>`)).join("")
+      || empty("受け渡し可能な注文はありません");
+    $("prep-delivered").innerHTML = prepDelivered.map((o) => prepItem(o,
+      `<button type="button" class="btn-small" data-prep="undeliver" data-id="${o.id}">受け渡し可能に戻す</button>`)).join("")
+      || empty("まだありません");
+  }
+
+  if (GOODS) {
+    $("btn-prep").addEventListener("click", async () => {
+      prepOpen = true;
+      show("ov-prep", true);
+      try { await loadPrep(); } catch (e) { POS.toast(e.message, "error"); }
+    });
+    $("btn-prep-close").addEventListener("click", () => { prepOpen = false; show("ov-prep", false); });
+    $("ov-prep").addEventListener("click", async (e) => {
+      const b = e.target.closest("[data-prep]");
+      if (!b || b.disabled) return;
+      const act = PREP_ACTIONS[b.dataset.prep];
+      b.disabled = true;
+      try {
+        const o = await api(`/api/orders/${b.dataset.id}/status`, { method: "POST", body: act });
+        if (act.to === "ready") POS.toast(`受付番号 ${o.call_no} を受け渡し可能にしました（PC5に表示）`, "ok", 2000);
+        if (act.to === "delivered") POS.toast(`受付番号 ${o.call_no} 受渡完了`, "ok", 1500);
+      } catch (ex) {
+        POS.sound.error();
+        POS.toast(ex.message, "error", 3500);
+      }
+      await loadPrep().catch(() => {});
+    });
+  }
 
   // ============================================================ カメラ（R-02, R-03, R-05, R-06）
   const camPref = Object.assign({ on: true, facing: "user", mirror: true }, POS.store.get(KEY_CAM, {}));
@@ -342,7 +561,8 @@
 
   async function startCamera() {
     stopCamera();
-    if (!camPref.on) { setCamVisible(false); return; }
+    // 物販（PC4）は事前注文がないので、カメラは使わない（商品ボタンだけで入力）
+    if (GOODS || !camPref.on) { setCamVisible(false); return; }
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || typeof jsQR !== "function") {
       setCamVisible(false);
       POS.toast("この画面ではカメラが使えません（HTTPSで開いているか確認）。ボタンで入力してください", "warn", 4000);
@@ -356,7 +576,7 @@
       video.srcObject = stream;
       await video.play();
       setCamVisible(true);
-      $("cam-msg").textContent = "QRカードをかざしてください（20〜30cm）";
+      $("cam-msg").textContent = "事前注文のQRをかざしてください（20〜30cm）";
       scanning = true;
       scanLoop();
     } catch (e) {
@@ -409,22 +629,12 @@
     last = { code, seenAt: now, addedAt: now };
     // 会計・番号表示中はカートを変えない
     if (!$("ov-checkout").classList.contains("hidden") || !$("ov-callno").classList.contains("hidden")) return;
-    const p = byCode.get(code);
-    if (!p) {
-      POS.sound.error();
-      flash("ng");
-      POS.toast("未登録のコード", "error");
-      $("cam-msg").textContent = `未登録のコード: ${raw.slice(0, 30)}`;
-      return;
-    }
-    if (addProduct(p, "qr")) {
-      POS.sound.ok();
-      flash("ok");
-      $("cam-msg").textContent = `${p.name} を追加しました`;
-    } else {
-      flash("ng");
-      $("cam-msg").textContent = `${p.name} は売切です`;
-    }
+    // カメラで読むのは事前注文のQRだけ。商品は商品ボタンで入れる
+    if (PreorderCode.isPreorder(code)) { loadPreorder(code); return; }
+    POS.sound.error();
+    flash("ng");
+    POS.toast("事前注文のQRではありません。商品は商品ボタンで入力してください", "error", 3000);
+    $("cam-msg").textContent = "事前注文のQRではありません";
   }
 
   $("btn-camera").addEventListener("click", () => {
@@ -446,7 +656,7 @@
     updateCamButtons();
   });
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible" && camPref.on && !stream) startCamera();
+    if (document.visibilityState === "visible" && camPref.on && !GOODS && !stream) startCamera();
   });
 
   // ============================================================ 通知
@@ -458,7 +668,8 @@
   function onMessage(msg) {
     if (msg.type === "product_updated") {
       const p = msg.product;
-      if (p.deleted) { products.delete(p.id); byCode.delete(p.code.toUpperCase()); }
+      // 削除・区分の変更で、この端末の商品でなくなったものは外す
+      if (p.deleted || p.category !== CATEGORY) { products.delete(p.id); byCode.delete(p.code.toUpperCase()); }
       else { products.set(p.id, p); byCode.set(p.code.toUpperCase(), p); }
       renderProducts();
       renderCart();
@@ -466,6 +677,7 @@
       applySettings(msg.settings);
     } else if (msg.type === "order_created" || msg.type === "order_updated") {
       if (historyOpen) loadHistory().catch(() => {});
+      if (GOODS && msg.order.category !== "food") loadPrep().catch(() => {});
     }
   }
 
@@ -474,6 +686,7 @@
       await loadProducts();
       applySettings(await api("/api/settings"));
       if (historyOpen) await loadHistory();
+      await loadPrep();
       if (pending) submitPending();
     } catch (e) {
       if (e.status !== 401) POS.toast(e.message, "error");

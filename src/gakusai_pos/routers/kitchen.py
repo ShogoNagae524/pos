@@ -1,11 +1,11 @@
-"""厨房端末（PC2）のAPI：状態変更・取消の確認・売切切替。"""
+"""厨房端末（PC2）のAPI：状態変更・取消の確認・売切切替。状態変更は物販（PC4）も使う。"""
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from .. import services as sv
-from ..auth import Terminal, require_role
+from ..auth import ROLE_CATEGORY, Terminal, require_role
 from ..schemas import SoldOutIn, StatusIn
 from .common import notify_order, notify_products
 
@@ -17,10 +17,17 @@ async def change_status(
     order_id: int,
     body: StatusIn,
     request: Request,
-    term: Terminal = Depends(require_role("kitchen")),
+    term: Terminal = Depends(require_role("kitchen", "goods")),
 ):
+    # PC2は飲食（準備中→受渡済）、PC4は物販（準備中→受渡可能→受渡済）
     order = sv.change_status(
-        request.app.state.db, order_id, body.current, body.to, term.label, term.tid
+        request.app.state.db,
+        order_id,
+        body.current,
+        body.to,
+        term.label,
+        term.tid,
+        category=ROLE_CATEGORY[term.role],
     )
     await notify_order(request.app, order)
     return order
@@ -42,6 +49,8 @@ async def sold_out(
     request: Request,
     term: Terminal = Depends(require_role("kitchen")),
 ):
+    if sv.get_product(request.app.state.db, product_id)["category"] != "food":
+        raise HTTPException(403, "物販の商品は厨房では切り替えられません")
     product = sv.set_sold_out(request.app.state.db, product_id, body.sold_out, term.label, term.tid)
     await notify_products(request.app, [product])
     return product

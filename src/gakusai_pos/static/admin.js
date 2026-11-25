@@ -16,6 +16,8 @@
     session_registered: "端末登録", backup: "バックアップ",
   };
 
+  const CATEGORY_LABEL = { food: "飲食", goods: "物販" };
+
   let tab = "home";
   let products = [];
   let dates = [];
@@ -38,7 +40,7 @@
   $("tabs").addEventListener("click", (e) => { const b = e.target.closest("[data-tab]"); if (b) showTab(b.dataset.tab); });
 
   function refreshTab() {
-    const f = { home: loadHome, products: loadProducts, orders: loadOrders, sales: loadSales, logs: () => loadLogs(true), settings: loadSettings }[tab];
+    const f = { home: loadHome, products: loadProducts, orders: loadOrders, sales: loadSales, charts: loadCharts, logs: () => loadLogs(true), settings: loadSettings }[tab];
     if (f) f().catch(fail);
   }
 
@@ -83,7 +85,13 @@
         <div class="stat"><div class="k">売上</div><div class="v num">${POS.yen(s.amount)}</div><div class="s num">金券${s.tickets}枚</div></div>
         <div class="stat"><div class="k">平均待ち時間</div><div class="v num">${fmtWait(s.avg_wait_seconds)}</div></div>
       </div>
+      <div class="muted">${categoryBreakdown(s)}</div>
       <div class="muted">取消 ${s.cancelled_count}件・テスト ${s.test_count}件（売上から除外）</div>`;
+  }
+
+  // 飲食・物販それぞれの売上（金券を別々に数えるとき用）
+  function categoryBreakdown(s) {
+    return s.categories.map((c) => `${c.label} ${c.orders}件・${POS.yen(c.amount)}（金券${c.tickets}枚）`).join("　／　");
   }
 
   function renderTerminals(list) {
@@ -93,7 +101,7 @@
       if (knownConnected.get(key) && !t.connected) lost = true;
       knownConnected.set(key, t.connected);
     }
-    if (lost) { POS.sound.alert(); POS.toast("受付・厨房の端末との接続が切れました", "error", 5000); }
+    if (lost) { POS.sound.alert(); POS.toast("受付・厨房・物販の端末との接続が切れました", "error", 5000); }
     $("terminals").innerHTML = list.length ? `<table class="data">
       <tr><th>端末</th><th>状態</th><th>最終通信</th><th>IP</th></tr>
       ${list.map((t) => `<tr>
@@ -134,18 +142,46 @@
     products = await api(`${A}/products`);
     renderProducts();
     renderManualItems();
+    renderPreorderUrl((await api(`${A}/settings`)).preorder_url || "");
   }
+
+  // ============================================================ 事前注文ページの案内QR
+  function renderPreorderUrl(url) {
+    const f = $("preorder-url-form");
+    if (document.activeElement !== f.preorder_url) f.preorder_url.value = url;
+    $("preorder-qr").classList.toggle("hidden", !url);
+    if (url) {
+      // URLが変わったら画像も取り直す
+      $("preorder-qr-img").src = `${A}/preorder-qr.png?u=${encodeURIComponent(url)}`;
+      $("preorder-qr-open").href = url;
+    }
+  }
+
+  $("preorder-url-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const url = e.target.preorder_url.value.trim();
+    try {
+      const s = await api(`${A}/settings`, { method: "PUT", body: { preorder_url: url } });
+      renderPreorderUrl(s.preorder_url || "");
+      POS.toast(url ? "事前注文ページのURLを保存しました" : "事前注文ページのURLを消しました", "ok");
+    } catch (ex) { fail(ex); }
+  });
 
   function renderProducts() {
     const t = $("product-table");
     if (!products.length) { t.innerHTML = `<tr><td class="muted">商品はまだありません</td></tr>`; return; }
-    t.innerHTML = `<tr><th>コード</th><th>商品名</th><th>価格</th><th>表示順</th><th>作れる数</th><th>売切</th><th></th></tr>` +
+    t.innerHTML = `<tr><th>コード</th><th>区分</th><th>商品名</th><th>価格</th><th>表示順</th><th>作れる数</th><th>待ち時間</th><th>売切</th><th></th></tr>` +
       products.map((p) => `<tr data-id="${p.id}">
         <td class="num"><strong>${esc(p.code)}</strong></td>
+        <td><select name="category">${Object.entries(CATEGORY_LABEL).map(([k, v]) =>
+          `<option value="${k}"${p.category === k ? " selected" : ""}>${v}</option>`).join("")}</select></td>
         <td><input name="name" value="${esc(p.name)}" maxlength="40" style="width:100%;min-width:140px"></td>
-        <td><input name="price" type="number" step="50" min="50" value="${p.price}" style="width:100px"></td>
+        <td><input name="price" type="number" step="50" value="${p.price}" style="width:100px" title="割引券はマイナス（例 -50）"></td>
         <td><input name="sort_order" type="number" value="${p.sort_order}" style="width:80px"></td>
         <td><input name="stock" type="number" min="0" value="${p.stock ?? ""}" placeholder="上限なし" style="width:100px"></td>
+        <td>${p.category === "goods"
+          ? `<label><input type="checkbox" name="needs_prep"${p.needs_prep ? " checked" : ""} style="min-height:auto"> あり</label>`
+          : '<span class="muted">厨房</span>'}</td>
         <td><button type="button" data-act="soldout" class="btn-small ${p.sold_out ? "btn-danger" : ""}">${p.sold_out ? "売切中" : "販売中"}</button></td>
         <td><div class="row" style="flex-wrap:nowrap">
           <button type="button" data-act="save" class="btn-small btn-primary">保存</button>
@@ -153,16 +189,29 @@
       </tr>`).join("");
   }
 
+  // 「待ち時間あり」は物販のときだけ選べる
+  function syncNeedsPrep() {
+    const f = $("product-form");
+    const goods = f.category.value === "goods";
+    $("needs-prep-label").classList.toggle("hidden", !goods);
+    if (!goods) f.needs_prep.checked = false;
+  }
+  $("product-form").category.addEventListener("change", syncNeedsPrep);
+
   $("product-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const f = e.target;
     const price = Number(f.price.value);
-    if (price <= 0 || price % 50 !== 0) { fail(new Error("価格は50円の倍数で入力してください")); return; }
-    const body = { name: f.name.value, price, stock: f.stock.value === "" ? null : Number(f.stock.value) };
+    if (price === 0 || price % 50 !== 0) { fail(new Error("価格は50円の倍数で入力してください（割引券はマイナス。0円は不可）")); return; }
+    const body = { name: f.name.value, price, stock: f.stock.value === "" ? null : Number(f.stock.value), category: f.category.value,
+      needs_prep: f.category.value === "goods" && f.needs_prep.checked };
     try {
       const p = await api(`${A}/products`, { method: "POST", body });
       POS.toast(`${p.code} ${p.name} を追加しました`, "ok");
+      const cat = f.category.value;
       f.reset();
+      f.category.value = cat; // 続けて同じ区分を登録しやすいように
+      syncNeedsPrep();
       f.name.focus();
       await loadProducts();
     } catch (ex) { fail(ex); }
@@ -177,16 +226,20 @@
     try {
       if (b.dataset.act === "save") {
         const price = Number(tr.querySelector("[name=price]").value);
-        if (price <= 0 || price % 50 !== 0) throw new Error("価格は50円の倍数で入力してください");
+        if (price === 0 || price % 50 !== 0) throw new Error("価格は50円の倍数で入力してください（割引券はマイナス。0円は不可）");
         const stockVal = tr.querySelector("[name=stock]").value;
         const body = {
           name: tr.querySelector("[name=name]").value,
           price,
           sort_order: Number(tr.querySelector("[name=sort_order]").value),
+          category: tr.querySelector("[name=category]").value,
         };
         if (stockVal === "") body.clear_stock = true; else body.stock = Number(stockVal);
+        // 区分を飲食に変えたら「待ち時間あり」は外す（飲食は常に厨房を通る）
+        const prep = tr.querySelector("[name=needs_prep]");
+        body.needs_prep = body.category === "goods" && !!(prep && prep.checked);
         await api(`${A}/products/${id}`, { method: "PATCH", body });
-        POS.toast("保存しました（受付・厨房に反映済み）", "ok");
+        POS.toast("保存しました（受付・厨房・物販に反映済み）", "ok");
       } else if (b.dataset.act === "soldout") {
         await api(`${A}/products/${id}`, { method: "PATCH", body: { sold_out: !p.sold_out } });
       } else if (b.dataset.act === "delete") {
@@ -220,12 +273,12 @@
     if (!products.length) products = await api(`${A}/products`);
     renderManualItems();
     const f = $("order-filter");
-    const qs = new URLSearchParams({ date: f.date.value, status: f.status.value, q: f.q.value, test: f.test.value });
+    const qs = new URLSearchParams({ date: f.date.value, status: f.status.value, q: f.q.value, test: f.test.value, category: f.category.value });
     orderList = await api(`${A}/orders?${qs}`);
     $("order-count").textContent = `${orderList.length}件（新しい順、最大500件）`;
     $("order-table").innerHTML = `<tr><th>ID</th><th>営業日</th><th>番号</th><th>会計</th><th>内容</th><th class="r">金額</th><th>状態</th><th>待ち時間</th><th></th></tr>` +
       orderList.map((o) => {
-        const wait = o.wait_seconds ?? (o.status === "waiting" || o.status === "cooking"
+        const wait = o.wait_seconds ?? (["waiting", "cooking", "ready"].includes(o.status)
           ? Math.floor((POS.serverNow() - o.paid_ts) / 1000) : null);
         return `<tr>
         <td class="num">${o.id}</td>
@@ -233,11 +286,12 @@
         <td class="num"><strong>${o.call_no}</strong></td>
         <td class="num">${POS.hhmm(o.paid_at)}</td>
         <td>${o.items.map((i) => `${esc(i.name)}×${i.qty}`).join("、")}
+          ${o.category === "goods" ? '<span class="badge">物販</span>' : ""}
           ${o.source === "manual" ? '<span class="badge">手入力</span>' : ""}
           ${o.is_test ? '<span class="badge badge-test">テスト</span>' : ""}</td>
         <td class="r num">${POS.yen(o.total)}<br><small class="muted">${o.tickets}枚</small></td>
-        <td><span class="badge badge-${o.status}">${POS.STATUS_LABEL[o.status]}</span></td>
-        <td class="num">${o.status === "cancelled" ? "—" : fmtWait(wait)}</td>
+        <td><span class="badge badge-${o.status}">${esc(o.status_label)}</span></td>
+        <td class="num">${o.status === "cancelled" || (o.category === "goods" && !o.ready_at && o.status !== "waiting") ? "—" : fmtWait(wait)}</td>
         <td>${o.status === "delivered" || o.status === "cancelled"
           ? `<button type="button" class="btn-small btn-ghost-danger" data-del="${o.id}">削除</button>` : ""}</td>
       </tr>`;
@@ -262,7 +316,7 @@
     const prev = {};
     box.querySelectorAll("input[data-pid]").forEach((i) => { prev[i.dataset.pid] = i.value; });
     box.innerHTML = products.length ? products.map((p) => `
-      <label style="display:flex;align-items:center;gap:6px">${esc(p.name)}（${POS.yen(p.price)}）
+      <label style="display:flex;align-items:center;gap:6px">${p.category === "goods" ? "【物販】" : ""}${esc(p.name)}（${POS.yen(p.price)}）
         <input type="number" min="0" max="99" data-pid="${p.id}" value="${prev[p.id] ?? ""}" placeholder="0" style="width:80px"></label>`).join("")
       : `<span class="muted">商品がありません</span>`;
     updateManualTotal();
@@ -290,7 +344,7 @@
     };
     try {
       const o = await api(`${A}/orders`, { method: "POST", body });
-      POS.toast(`登録しました（呼出番号 ${o.call_no}・${POS.yen(o.total)}）`, "ok", 4000);
+      POS.toast(`登録しました（${o.category === "goods" ? "受付番号" : "呼出番号"} ${o.call_no}・${POS.yen(o.total)}）`, "ok", 4000);
       $("manual-items").querySelectorAll("input").forEach((i) => { i.value = ""; });
       f.call_no.value = "";
       updateManualTotal();
@@ -320,13 +374,14 @@
   async function loadSales() {
     await loadDates();
     const date = $("sales-date").value;
-    const s = await api(`${A}/summary?date=${date}`);
+    const s = await api(`${A}/summary?${new URLSearchParams({ date, category: $("sales-category").value })}`);
     $("sales-stats").innerHTML = `
       <div class="stat"><div class="k">注文数</div><div class="v num">${s.orders}件</div></div>
       <div class="stat"><div class="k">売上</div><div class="v num">${POS.yen(s.amount)}</div><div class="s num">金券 ${s.tickets}枚</div></div>
       <div class="stat"><div class="k">平均待ち時間</div><div class="v num">${fmtWait(s.avg_wait_seconds)}</div><div class="s">受渡済 ${s.delivered_count}件</div></div>
       <div class="stat"><div class="k">除外（取消）</div><div class="v num">${s.cancelled_count}件</div><div class="s num">${POS.yen(s.cancelled_amount)}</div></div>
-      <div class="stat"><div class="k">除外（テスト）</div><div class="v num">${s.test_count}件</div></div>`;
+      <div class="stat"><div class="k">除外（テスト）</div><div class="v num">${s.test_count}件</div></div>
+      ${s.categories.map((c) => `<div class="stat"><div class="k">${c.label}</div><div class="v num">${POS.yen(c.amount)}</div><div class="s num">${c.orders}件・金券 ${c.tickets}枚</div></div>`).join("")}`;
     $("sales-products").innerHTML = `<tr><th>商品</th><th class="r">個数</th><th class="r">金額</th><th class="r">金券</th></tr>` +
       (s.products.map((p) => `<tr><td>${esc(p.name)}</td><td class="r num">${p.qty}</td><td class="r num">${POS.yen(p.amount)}</td><td class="r num">${p.tickets}枚</td></tr>`).join("")
         || `<tr><td colspan="4" class="muted">まだありません</td></tr>`);
@@ -345,7 +400,121 @@
     await loadClosings();
   }
   $("sales-date").addEventListener("change", () => loadSales().catch(fail));
+  $("sales-category").addEventListener("change", () => loadSales().catch(fail));
   $("btn-sales-reload").addEventListener("click", () => loadSales().catch(fail));
+
+  // ============================================================ 売上グラフ
+  // 期間は「営業日」などのプリセットか、から・まで（30分単位）で選ぶ
+  const addDay = (d, n) => {
+    const t = new Date(`${d}T00:00`);
+    t.setDate(t.getDate() + n);
+    return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`;
+  };
+  let chartPresets = [];
+  let chartData = null;
+
+  function buildChartPresets() {
+    const s = settingsCache;
+    const list = [];
+    const seen = new Set();
+    const addPreset = (label, from, to) => {
+      const key = `${from}|${to}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      list.push({ label, since: `${from}T00:00`, until: `${addDay(to, 1)}T00:00`, trim: true });
+    };
+    addPreset(`今日（${today()}）${dayLabel(today())}`, today(), today());
+    if (s.day1) addPreset(`1日目（${s.day1}）`, s.day1, s.day1);
+    if (s.day2) addPreset(`2日目（${s.day2}）`, s.day2, s.day2);
+    if (s.day1 && s.day2) addPreset("1日目〜2日目", s.day1 < s.day2 ? s.day1 : s.day2, s.day1 < s.day2 ? s.day2 : s.day1);
+    for (const d of dates) addPreset(`${d}${dayLabel(d)}`, d, d);
+    if (dates.length > 1) {
+      const sorted = [...dates].sort();
+      addPreset("全営業日", sorted[0], sorted[sorted.length - 1]);
+    }
+    chartPresets = list;
+    const sel = $("chart-preset");
+    const prev = sel.value;
+    sel.innerHTML = list.map((p, i) => `<option value="${i}">${esc(p.label)}</option>`).join("")
+      + `<option value="custom">期間を指定</option>`;
+    sel.value = prev && [...sel.options].some((o) => o.value === prev) ? prev : "0";
+  }
+
+  function applyChartPreset() {
+    const p = chartPresets[Number($("chart-preset").value)];
+    if (!p) return;
+    $("chart-since").value = p.since;
+    $("chart-until").value = p.until;
+  }
+
+  let chartsReady = false;
+  async function loadCharts() {
+    if (!chartsReady) {
+      // 営業日（1日目・2日目）をプリセットに使うので、設定を先に読む
+      settingsCache = { ...settingsCache, ...(await api(`${A}/settings`)) };
+      await loadDates();
+      buildChartPresets();
+      applyChartPreset();
+      chartsReady = true;
+    }
+    const since = $("chart-since").value;
+    const until = $("chart-until").value;
+    if (!since || !until) return;
+    const preset = $("chart-preset").value !== "custom";
+    const q = new URLSearchParams({ since, until, trim: preset ? "true" : "false" });
+    if ($("chart-category").value) q.set("category", $("chart-category").value);
+    $("chart-body").classList.add("loading"); // 読み込み中は前のグラフを薄く残す
+    try {
+      chartData = await api(`${A}/sales-series?${q}`);
+    } finally {
+      $("chart-body").classList.remove("loading");
+    }
+    renderCharts();
+  }
+
+  function renderCharts() {
+    const d = chartData;
+    if (!d) return;
+    const peak = d.buckets.reduce((m, b) => (b.amount > (m ? m.amount : 0) ? b : m), null);
+    const C = SalesCharts;
+    $("chart-stats").innerHTML = `
+      <div class="stat"><div class="k">期間の売上</div><div class="v num">${POS.yen(d.amount)}</div><div class="s num">金券 ${d.tickets}枚</div></div>
+      <div class="stat"><div class="k">注文数</div><div class="v num">${d.orders}件</div></div>
+      <div class="stat"><div class="k">最も売れた30分</div><div class="v num">${peak ? `${C.hm(C.ms(peak.start))}〜` : "—"}</div>
+        <div class="s num">${peak ? `${C.md(C.ms(peak.start))}・${POS.yen(peak.amount)}・${peak.orders}件` : "売上なし"}</div></div>`;
+    C.renderCumulative($("chart-cumulative"), d);
+    C.renderBars($("chart-bars"), d);
+    $("chart-table").innerHTML = `<tr><th>時間帯</th><th class="r">注文数</th><th class="r">売上</th><th class="r">金券</th><th class="r">累計</th></tr>` +
+      (d.buckets.map((b) => `<tr><td class="num">${C.md(C.ms(b.start))} ${C.hm(C.ms(b.start))}〜${C.hm(C.ms(b.end))}</td>
+        <td class="r num">${b.orders}</td><td class="r num">${POS.yen(b.amount)}</td><td class="r num">${b.tickets}枚</td>
+        <td class="r num">${POS.yen(b.cumulative)}</td></tr>`).join("")
+        || `<tr><td colspan="5" class="muted">この期間の売上はありません</td></tr>`);
+  }
+
+  $("chart-preset").addEventListener("change", () => {
+    applyChartPreset();
+    loadCharts().catch(fail);
+  });
+  // 日時を手で変えたら「期間を指定」に切り替える（売上のない時間帯も切り落とさない）
+  for (const id of ["chart-since", "chart-until"]) {
+    $(id).addEventListener("change", () => { $("chart-preset").value = "custom"; });
+  }
+  $("chart-category").addEventListener("change", () => loadCharts().catch(fail));
+  $("chart-filter").addEventListener("submit", (e) => {
+    e.preventDefault();
+    if ($("chart-since").value >= $("chart-until").value) {
+      fail(new Error("「から」は「まで」より前にしてください"));
+      return;
+    }
+    loadCharts().catch(fail);
+  });
+  if (window.ResizeObserver) {
+    let w = 0;
+    new ResizeObserver(() => {
+      const nw = $("chart-cumulative").clientWidth;
+      if (nw && nw !== w) { w = nw; renderCharts(); }
+    }).observe($("chart-cumulative"));
+  }
 
   let settingsCache = {};
   const dayLabel = (d) => (d === settingsCache.day1 ? "（1日目）" : d === settingsCache.day2 ? "（2日目）" : "");
@@ -353,18 +522,21 @@
   async function updateClosingExpected() {
     const d = $("closing-date").value;
     if (!d) return;
-    const s = await api(`${A}/summary?date=${d}`);
-    $("closing-expected").textContent = `この日の売上 ${POS.yen(s.amount)} ＝ 金券 ${s.tickets}枚（${s.orders}件）`;
+    const cat = $("closing-category").value;
+    const s = await api(`${A}/summary?${new URLSearchParams({ date: d, category: cat })}`);
+    $("closing-expected").textContent = `この日の${cat ? CATEGORY_LABEL[cat] : ""}売上 ${POS.yen(s.amount)} ＝ 金券 ${s.tickets}枚（${s.orders}件）`;
   }
   $("closing-date").addEventListener("change", () => updateClosingExpected().catch(fail));
+  $("closing-category").addEventListener("change", () => updateClosingExpected().catch(fail));
 
   async function loadClosings() {
     const list = await api(`${A}/closings`);
-    $("closing-table").innerHTML = `<tr><th>記録時刻</th><th>営業日</th><th class="r">売上（枚）</th><th class="r">数えた枚数</th><th class="r">差</th><th>メモ</th></tr>` +
+    $("closing-table").innerHTML = `<tr><th>記録時刻</th><th>営業日</th><th>区分</th><th class="r">売上（枚）</th><th class="r">数えた枚数</th><th class="r">差</th><th>メモ</th></tr>` +
       (list.map((c) => `<tr><td class="num">${esc(c.at.replace("T", " "))}</td><td class="num">${c.business_date}</td>
+        <td>${c.category ? CATEGORY_LABEL[c.category] : "合計"}</td>
         <td class="r num">${c.expected_tickets}</td><td class="r num">${c.counted_tickets}</td>
         <td class="r num" style="font-weight:800;color:${c.diff_tickets ? "var(--danger)" : "var(--ok)"}">${c.diff_tickets > 0 ? "+" : ""}${c.diff_tickets}枚</td>
-        <td>${esc(c.note)}</td></tr>`).join("") || `<tr><td colspan="6" class="muted">まだありません</td></tr>`);
+        <td>${esc(c.note)}</td></tr>`).join("") || `<tr><td colspan="7" class="muted">まだありません</td></tr>`);
   }
 
   $("closing-form").addEventListener("submit", async (e) => {
@@ -372,7 +544,8 @@
     const f = e.target;
     try {
       const r = await api(`${A}/closing`, { method: "POST", body: {
-        business_date: f.business_date.value, counted_tickets: Number(f.counted_tickets.value), note: f.note.value } });
+        business_date: f.business_date.value, counted_tickets: Number(f.counted_tickets.value), note: f.note.value,
+        category: f.category.value || null } });
       const ok = r.diff_tickets === 0;
       $("closing-result").innerHTML = `<div class="${ok ? "card" : "danger-box"}" style="font-size:1.2rem">
         売上 ${r.expected_tickets}枚（${POS.yen(r.expected_amount)}）／ 数えた枚数 ${r.counted_tickets}枚 ／
@@ -396,7 +569,7 @@
     else if (c.from && c.to) text = `番号${c.call_no} ${POS.STATUS_LABEL[c.from]} → ${POS.STATUS_LABEL[c.to]}`;
     else if (ev.kind === "sold_out") text = `${c.name}：${c.sold_out ? "売切" : "販売再開"}`;
     else if (ev.kind === "orders_purged") text = `${c.count}件・${POS.yen(c.amount)} を削除`;
-    else if (ev.kind === "closing") text = `${c.business_date} 売上${c.expected_tickets}枚／実数${c.counted_tickets}枚／差${c.diff_tickets}枚`;
+    else if (ev.kind === "closing") text = `${c.business_date}${c.category ? `（${CATEGORY_LABEL[c.category]}）` : ""} 売上${c.expected_tickets}枚／実数${c.counted_tickets}枚／差${c.diff_tickets}枚`;
     else text = JSON.stringify(c, null, 0);
     return `<tr>
       <td class="num" style="white-space:nowrap">${esc(ev.at.replace("T", " "))}</td>
@@ -453,7 +626,7 @@
     };
     if (f.passcode.value) {
       if (f.passcode.value !== $("s-pass2").value) { fail(new Error("パスコードが一致しません")); return; }
-      if (!confirm("パスコードを変更すると、PC1・PC2は登録し直しになります。変更しますか？")) return;
+      if (!confirm("パスコードを変更すると、PC1・PC2・PC4・PC5は登録し直しになります。変更しますか？")) return;
       body.passcode = f.passcode.value;
     }
     try {
@@ -476,6 +649,7 @@
     refreshTimer = setTimeout(() => {
       if (tab === "orders") loadOrders().catch(() => {});
       if (tab === "sales") loadSales().catch(() => {});
+      if (tab === "charts") loadCharts().catch(() => {});
       if (tab === "home") loadHome().catch(() => {});
     }, 800);
   }
